@@ -13,6 +13,8 @@ assert.equal(manifest.display_name, "Voice Mode", "manifest.json display_name mu
 assert.equal(manifest.js, "dist/index.js", "manifest.json js must point to dist/index.js");
 assert.equal(manifest.css, "style.css", "manifest.json css must point to style.css");
 assert.deepEqual(manifest.requires, [], "manifest.json requires must be empty for zero-Extras loading");
+const chineseLocaleFile = manifest.i18n?.["zh-cn"];
+assert.ok(chineseLocaleFile, "manifest.json must register the Simplified Chinese locale");
 
 const requiredFiles = [
   ".gitattributes",
@@ -26,6 +28,7 @@ const requiredFiles = [
   "CONTEXT.md",
   "README.md",
   "README.zh-CN.md",
+  chineseLocaleFile,
   "CHANGELOG.md",
   "server-plugin/index.mjs",
   "scripts/install-server-plugin.mjs",
@@ -48,6 +51,7 @@ assert.ok(
 const bundle = fs.readFileSync(path.join(root, "dist/index.js"), "utf8");
 assert.match(bundle, /\.\.\/\.\.\/\.\.\/\.\.\/\.\.\/script\.js/, "dist/index.js must resolve ../../../../../script.js");
 assert.match(bundle, /\.\.\/\.\.\/\.\.\/\.\.\/extensions\.js/, "dist/index.js must resolve ../../../../extensions.js");
+assert.match(bundle, /\.\.\/\.\.\/\.\.\/\.\.\/i18n\.js/, "dist/index.js must resolve ../../../../i18n.js");
 assert.match(bundle, /\.\.\/\.\.\/\.\.\/\.\.\/secrets\.js/, "dist/index.js must resolve ../../../../secrets.js");
 assert.doesNotMatch(bundle, /\bnode:/, "dist/index.js must not contain node:* imports");
 assert.doesNotMatch(bundle, /sk-[A-Za-z0-9_-]{16,}/, "dist/index.js must not contain secret tokens");

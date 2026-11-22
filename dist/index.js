@@ -11,6 +11,7 @@ import {
   stopGeneration
 } from "../../../../../script.js";
 import { extension_settings, getContext } from "../../../../extensions.js";
+import { translate } from "../../../../i18n.js";
 import {
   canViewSecrets,
   deleteSecret,
@@ -3102,12 +3103,13 @@ var SillyTavernSecretBroker = class {
       await this.deleteSecret(slot);
       return;
     }
-    this.ephemeral.set(slot, trimmed);
-    await this.host.writeSecret(
+    const id = await this.host.writeSecret(
       SECRET_SLOT_KEYS[slot],
       trimmed,
       `Voice Mode (${slot})`
     );
+    if (id === null) throw new Error("SillyTavern did not save the secret.");
+    this.ephemeral.set(slot, trimmed);
   }
   async getSecret(slot) {
     const mem = this.ephemeral.get(slot);
@@ -3133,8 +3135,8 @@ var SillyTavernSecretBroker = class {
     return null;
   }
   async deleteSecret(slot) {
-    this.ephemeral.delete(slot);
     await this.host.deleteSecret(SECRET_SLOT_KEYS[slot]);
+    this.ephemeral.delete(slot);
   }
   knownSecretsSnapshot() {
     return Array.from(this.ephemeral.values());
@@ -6435,6 +6437,21 @@ function createEnergyVadWorkerClient(minSpeechRms = 0.015) {
     }
   });
 }
+function webSpeechError(code, fallback) {
+  if (code === "not-allowed" || code === "NotAllowedError") {
+    return new DOMException(
+      "Microphone access was denied. Allow microphone access in the site settings and try again, or type your message.",
+      "NotAllowedError"
+    );
+  }
+  if (code === "service-not-allowed") {
+    return new DOMException(
+      "The browser denied access to its speech recognition service. Select another ASR engine or type your message.",
+      "ServiceNotAllowedError"
+    );
+  }
+  return fallback ?? new Error(`SpeechRecognition error: ${code}`);
+}
 var VoiceModeIoController = class {
   options;
   vadWorkerClient;
@@ -6443,6 +6460,7 @@ var VoiceModeIoController = class {
   cloudSession = null;
   daemonAsrClient = null;
   systemRecognition = null;
+  dictationGeneration = 0;
   dictationState = "idle";
   bargeInCount = 0;
   ownsVadWorker;
@@ -6535,11 +6553,13 @@ var VoiceModeIoController = class {
       this.options.onInsecureOrigin?.(originStatus);
       return false;
     }
+    const generation = ++this.dictationGeneration;
     await this.stopDictation();
+    if (generation !== this.dictationGeneration) return false;
     this.triggerBargeIn("manual");
     const settings = this.options.getSettings();
     if (settings.asrEngine === "system") {
-      return this.startBrowserSpeechRecognition(settings);
+      return this.startBrowserSpeechRecognition(settings, generation);
     }
     const boundFetch = this.options.fetchImpl ? (input, init) => this.options.fetchImpl(input, init) : (input, init) => globalThis.fetch(input, init);
     const openaiAsr = new OpenAiCompatAsrTransport({
@@ -6571,13 +6591,16 @@ var VoiceModeIoController = class {
     return true;
   }
   async stopDictation() {
-    if (this.systemRecognition) {
+    const recognition = this.systemRecognition;
+    if (recognition) {
       try {
-        this.systemRecognition.stop();
+        recognition.stop();
       } catch {
       }
-      this.systemRecognition = null;
-      this.setDictationState("idle");
+      if (this.systemRecognition === recognition) {
+        this.systemRecognition = null;
+        this.setDictationState("idle");
+      }
     }
     if (this.cloudSession) {
       await this.cloudSession.stop();
@@ -6589,6 +6612,7 @@ var VoiceModeIoController = class {
     }
   }
   async dispose() {
+    ++this.dictationGeneration;
     await this.stopDictation();
     await this.monitor.stop();
     if (this.ownsVadWorker) {
@@ -6599,22 +6623,26 @@ var VoiceModeIoController = class {
     this.dictationState = state;
     this.options.onDictationStateChange?.(state);
   }
-  startBrowserSpeechRecognition(settings) {
+  startBrowserSpeechRecognition(settings, generation) {
     const win = this.options.getWindow();
     const Ctor = win?.SpeechRecognition ?? win?.webkitSpeechRecognition;
     if (typeof Ctor !== "function") {
       this.options.onError?.(
-        new Error(
-          "Browser SpeechRecognition is unavailable; select OpenAI-Compatible or Local Voice Daemon ASR."
+        new DOMException(
+          "Browser SpeechRecognition is unavailable; select OpenAI-Compatible or Local Voice Daemon ASR.",
+          "NotSupportedError"
         )
       );
       return false;
     }
     const rec = new Ctor();
-    rec.lang = settings.asrLanguage && settings.asrLanguage !== "auto" ? settings.asrLanguage : "en-US";
+    if (settings.asrLanguage && settings.asrLanguage !== "auto") {
+      rec.lang = settings.asrLanguage;
+    }
     rec.continuous = false;
     rec.interimResults = false;
     rec.onresult = (ev) => {
+      if (generation !== this.dictationGeneration) return;
       const parts = [];
       for (let i = 0; i < ev.results.length; i++) {
         const res = ev.results[i];
@@ -6624,31 +6652,356 @@ var VoiceModeIoController = class {
       const joined = parts.join(" ").trim();
       if (joined) this.injectDictatedText(joined);
     };
-    rec.onerror = (ev) => {
-      if (ev.error && ev.error !== "no-speech" && ev.error !== "aborted") {
-        this.options.onError?.(new Error(`SpeechRecognition error: ${ev.error}`));
+    const finish = (error) => {
+      if (generation !== this.dictationGeneration) return;
+      ++this.dictationGeneration;
+      if (this.systemRecognition !== rec) return;
+      this.systemRecognition = null;
+      this.setDictationState("idle");
+      if (error !== void 0) {
+        rec.onresult = null;
+        this.options.onError?.(error);
       }
     };
-    rec.onend = () => {
-      if (this.systemRecognition === rec) {
-        this.systemRecognition = null;
-        this.setDictationState("idle");
+    rec.onerror = ({ error }) => {
+      if (error && error !== "no-speech" && error !== "aborted") {
+        finish(webSpeechError(error));
       }
     };
+    rec.onend = () => finish();
     this.systemRecognition = rec;
     this.setDictationState("listening");
-    rec.start();
-    return true;
+    try {
+      rec.start();
+      return true;
+    } catch (error) {
+      const name = error instanceof Error ? error.name : "";
+      finish(webSpeechError(name, error));
+      return false;
+    }
   }
 };
 
-// src/runtime.ts
+// src/settings-drawer.ts
 function makeEl(doc, tag, className, text) {
   const node = doc.createElement(tag);
   if (className) node.className = className;
   if (text !== void 0) node.textContent = text;
   return node;
 }
+function buildSettingsDrawer(doc, hostContainer, options) {
+  const { text, getSettings, updateSettings, resolveActiveSpeaker, originStatus } = options;
+  const settings = getSettings();
+  const root = makeEl(doc, "div", "inline-drawer vm-st-drawer");
+  root.id = "voice_mode_settings_drawer";
+  const header = makeEl(doc, "div", "inline-drawer-toggle inline-drawer-header");
+  const title = makeEl(doc, "b", void 0, text("title", "Voice Mode"));
+  const statusBadgeEl = makeEl(doc, "span", "vm-st-status-badge", text("ready", "Ready"));
+  statusBadgeEl.setAttribute("role", "status");
+  const icon = makeEl(doc, "div", "inline-drawer-icon fa-solid fa-circle-chevron-down down");
+  header.append(title, statusBadgeEl, icon);
+  const content = makeEl(doc, "div", "inline-drawer-content vm-st-settings");
+  const insecureBannerEl = makeEl(
+    doc,
+    "div",
+    "vm-st-insecure-banner"
+  );
+  insecureBannerEl.dataset.vmInsecureBanner = "true";
+  const showOriginStatus = (status) => {
+    insecureBannerEl.hidden = status.secure;
+    insecureBannerEl.textContent = status.secure ? "" : text("insecure_origin", "{0}", status.remediation, status.originLabel);
+  };
+  showOriginStatus(originStatus);
+  content.appendChild(insecureBannerEl);
+  const addCheckbox = (id, labelText, checked, onChange) => {
+    const row = makeEl(doc, "label", "checkbox_label vm-st-row");
+    const input = makeEl(doc, "input");
+    input.type = "checkbox";
+    input.id = id;
+    input.checked = checked;
+    input.addEventListener("change", () => onChange(input.checked));
+    row.append(input, makeEl(doc, "span", void 0, labelText));
+    content.appendChild(row);
+  };
+  addCheckbox("vm_st_enabled", text("enabled", "Enable Streaming Voice Mode"), settings.enabled, (v) => {
+    updateSettings((d) => {
+      d.enabled = v;
+    });
+    if (!v) options.triggerBargeIn();
+  });
+  addCheckbox(
+    "vm_st_narration_split",
+    text("narration_split", "Separate *Narration* and Dialogue Voices"),
+    settings.narrationSplitEnabled,
+    (v) => updateSettings((d) => void (d.narrationSplitEnabled = v))
+  );
+  addCheckbox(
+    "vm_st_emotion_prompt",
+    text("emotion_prompt", "Inject Emotion Cue System Prompt (<whisper>, <break>)"),
+    settings.emotionPromptEnabled,
+    (v) => updateSettings((d) => void (d.emotionPromptEnabled = v))
+  );
+  addCheckbox(
+    "vm_st_auto_send",
+    text("auto_send", "Auto-Send Message After Voice Dictation"),
+    settings.autoSendOnDictation,
+    (v) => updateSettings((d) => void (d.autoSendOnDictation = v))
+  );
+  addCheckbox(
+    "vm_st_use_server_proxy",
+    text("server_proxy", "Route Cloud TTS via Optional Server Plugin Proxy (/api/plugins/voice-mode)"),
+    settings.useServerPluginProxy,
+    (v) => updateSettings((d) => void (d.useServerPluginProxy = v))
+  );
+  const datalist = makeEl(doc, "datalist");
+  datalist.id = "vm_st_kokoro_voices";
+  for (const preset of KOKORO_DEFAULT_SPEAKERS) {
+    const opt = makeEl(doc, "option");
+    opt.value = preset.id;
+    opt.textContent = `${preset.label} (${preset.lang})`;
+    datalist.appendChild(opt);
+  }
+  content.appendChild(datalist);
+  const makeSelect = (id, items, initial, onChange) => {
+    const sel = makeEl(doc, "select", "text_pole");
+    sel.id = id;
+    for (const [val, label] of items) {
+      const opt = makeEl(doc, "option", void 0, label);
+      opt.value = val;
+      opt.selected = val === initial;
+      sel.appendChild(opt);
+    }
+    if (onChange) sel.addEventListener("change", () => onChange(sel.value));
+    return sel;
+  };
+  const makeInput = (id, type, placeholder, initial = "") => {
+    const inp = makeEl(doc, "input", "text_pole");
+    inp.type = type;
+    inp.id = id;
+    inp.placeholder = placeholder;
+    inp.value = initial;
+    return inp;
+  };
+  const ENGINE_OPTIONS = [
+    ["system", text("tts_system", "Browser System TTS (Zero Config)")],
+    ["kokoro-daemon", text("tts_kokoro", "Local Kokoro Daemon (103 Voices)")],
+    ["openai-compat", text("tts_openai", "OpenAI-Compatible BYOK TTS")],
+    ["mimo", text("tts_mimo", "Xiaomi MiMo TTS")]
+  ];
+  const buildVoiceRow = (prefix, heading, currentEngine, currentVoice, onUpdate) => {
+    const wrap = makeEl(doc, "div", "vm-st-field-group");
+    wrap.appendChild(makeEl(doc, "label", void 0, heading));
+    const select = makeSelect(`${prefix}_engine`, ENGINE_OPTIONS, currentEngine);
+    const voiceInput = makeInput(
+      `${prefix}_voice`,
+      "text",
+      text("voice_id", "Voice ID (zf_001, alloy, default)"),
+      currentVoice
+    );
+    voiceInput.setAttribute("list", "vm_st_kokoro_voices");
+    const commit = () => onUpdate(select.value, voiceInput.value.trim());
+    select.addEventListener("change", commit);
+    voiceInput.addEventListener("change", commit);
+    wrap.append(select, voiceInput);
+    content.appendChild(wrap);
+  };
+  buildVoiceRow(
+    "vm_st_default",
+    text("default_voice", "Default Character Voice"),
+    settings.defaultVoice.engine,
+    settings.defaultVoice.voice,
+    (engine, voice) => updateSettings((d) => {
+      d.defaultVoice = { engine, voice };
+    })
+  );
+  buildVoiceRow(
+    "vm_st_narrator",
+    text("narrator_voice", "Narrator Voice (*action*)"),
+    settings.narratorVoice.engine,
+    settings.narratorVoice.voice,
+    (engine, voice) => updateSettings((d) => {
+      d.narratorVoice = { engine, voice };
+    })
+  );
+  const charWrap = makeEl(doc, "div", "vm-st-field-group");
+  charWrap.id = "vm_st_char_voice_section";
+  const charLabel = makeEl(doc, "label");
+  charLabel.id = "vm_st_active_char_label";
+  const charEngineSelect = makeSelect(
+    "vm_st_char_engine",
+    [["", text("inherit_voice", "Inherit Default Character Voice")], ...ENGINE_OPTIONS],
+    ""
+  );
+  const charVoiceInput = makeInput(
+    "vm_st_char_voice",
+    "text",
+    text("character_voice_override", "Character Voice ID override")
+  );
+  charVoiceInput.setAttribute("list", "vm_st_kokoro_voices");
+  const charResetBtn = makeEl(
+    doc,
+    "button",
+    "menu_button",
+    text("reset_voice", "Reset Character Voice")
+  );
+  charResetBtn.type = "button";
+  charResetBtn.id = "vm_st_char_reset_btn";
+  const activeVoiceKey = () => {
+    const { speaker, avatar } = resolveActiveSpeaker();
+    return { key: avatar || speaker, label: speaker || avatar || text("no_character", "(None)") };
+  };
+  const refreshCharacter = () => {
+    const { key, label } = activeVoiceKey();
+    const entry = key ? getSettings().voiceMap[key] : void 0;
+    charLabel.textContent = text("active_voice", "Active Character Voice: {0}", label);
+    charEngineSelect.value = entry ? entry.engine : "";
+    charVoiceInput.value = entry ? entry.voice : "";
+    charEngineSelect.disabled = charVoiceInput.disabled = charResetBtn.disabled = !key;
+  };
+  const commitCharOverride = () => {
+    const { key } = activeVoiceKey();
+    if (!key) return;
+    const eng = charEngineSelect.value;
+    const v = charVoiceInput.value.trim();
+    updateSettings((d) => {
+      if (!eng && !v) delete d.voiceMap[key];
+      else d.voiceMap[key] = { engine: eng || d.defaultVoice.engine, voice: v };
+    });
+    refreshCharacter();
+  };
+  charEngineSelect.addEventListener("change", commitCharOverride);
+  charVoiceInput.addEventListener("change", commitCharOverride);
+  charResetBtn.addEventListener("click", () => {
+    const { key } = activeVoiceKey();
+    if (key) updateSettings((d) => void delete d.voiceMap[key]);
+    refreshCharacter();
+  });
+  charWrap.append(charLabel, charEngineSelect, charVoiceInput, charResetBtn);
+  content.appendChild(charWrap);
+  refreshCharacter();
+  const endpointsWrap = makeEl(doc, "div", "vm-st-field-group");
+  endpointsWrap.appendChild(makeEl(doc, "label", void 0, text("endpoints", "Endpoint Base URLs")));
+  for (const [id, ph, key] of [
+    ["vm_st_openai_tts_base_url", text("openai_tts_url", "OpenAI TTS URL"), "openaiTtsBaseUrl"],
+    ["vm_st_asr_base_url", text("openai_asr_url", "OpenAI ASR URL"), "asrBaseUrl"],
+    ["vm_st_daemon_base_url", text("daemon_url", "Local Daemon URL"), "daemonBaseUrl"]
+  ]) {
+    const inp = makeInput(id, "url", ph, settings[key]);
+    inp.addEventListener("change", () => {
+      updateSettings((d) => {
+        d[key] = inp.value.trim();
+      });
+      inp.value = getSettings()[key];
+    });
+    const label = makeEl(doc, "label", void 0, ph);
+    label.htmlFor = id;
+    endpointsWrap.append(label, inp);
+  }
+  content.appendChild(endpointsWrap);
+  const bargeWrap = makeEl(doc, "div", "vm-st-field-group");
+  bargeWrap.appendChild(makeEl(doc, "label", void 0, text("barge_and_asr", "Voice Barge-In & ASR Engine")));
+  const bargeSelect = makeSelect(
+    "vm_st_barge_mode",
+    [
+      ["detect", text("barge_detect", "AEC3 Auto-Detect (Safe Default)")],
+      ["auto", text("barge_auto", "Force Hands-Free Barge-In")],
+      ["manual", text("barge_manual", "Manual Button / Hotkey Only")]
+    ],
+    settings.bargeInMode,
+    (v) => updateSettings((d) => void (d.bargeInMode = v))
+  );
+  const asrSelect = makeSelect(
+    "vm_st_asr_engine",
+    [
+      ["system", text("asr_system", "Browser SpeechRecognition ASR")],
+      ["daemon", text("asr_daemon", "Local Voice Daemon ASR")],
+      ["openai-compat", text("asr_openai", "OpenAI-Compatible Whisper ASR")]
+    ],
+    settings.asrEngine,
+    (v) => updateSettings((d) => void (d.asrEngine = v))
+  );
+  bargeSelect.setAttribute("aria-label", text("barge_mode", "Voice Barge-In mode"));
+  asrSelect.setAttribute("aria-label", text("asr_engine", "ASR engine"));
+  bargeWrap.append(bargeSelect, asrSelect);
+  content.appendChild(bargeWrap);
+  const secretWrap = makeEl(doc, "div", "vm-st-field-group");
+  secretWrap.appendChild(makeEl(doc, "label", void 0, text("secrets", "Server Secrets (/api/secrets/write)")));
+  const slotSelect = makeSelect(
+    "vm_st_secret_slot",
+    [
+      ["openaiTts", text("secret_openai", "OpenAI-Compatible TTS Key")],
+      ["mimo", text("secret_mimo", "MiMo TTS Key")],
+      ["asr", text("secret_asr", "OpenAI-Compatible ASR Key")],
+      ["daemon", text("secret_daemon", "Local Voice Daemon Token")]
+    ],
+    "openaiTts"
+  );
+  const secretInput = makeInput("vm_st_secret_input", "password", text("paste_secret", "Paste secret key"));
+  secretInput.autocomplete = "off";
+  const saveKeyBtn = makeEl(doc, "button", "menu_button", text("save_secret", "Save Server Secret"));
+  saveKeyBtn.type = "button";
+  saveKeyBtn.id = "vm_st_save_secret_btn";
+  saveKeyBtn.addEventListener("click", () => {
+    const slot = slotSelect.value;
+    const value = secretInput.value;
+    secretInput.value = "";
+    saveKeyBtn.disabled = true;
+    void options.saveSecret(slot, value).finally(() => {
+      saveKeyBtn.disabled = false;
+    });
+  });
+  secretWrap.append(slotSelect, secretInput, saveKeyBtn);
+  content.appendChild(secretWrap);
+  const actions = makeEl(doc, "div", "vm-st-actions");
+  const dictateBtn = makeEl(
+    doc,
+    "button",
+    "menu_button",
+    text("dictate", "Dictate Mic")
+  );
+  dictateBtn.type = "button";
+  dictateBtn.id = "vm_st_dictate_btn";
+  dictateBtn.disabled = !originStatus.secure;
+  dictateBtn.addEventListener("click", options.toggleDictation);
+  const bargeBtn = makeEl(
+    doc,
+    "button",
+    "menu_button",
+    text("barge", "Stop / Barge-In")
+  );
+  bargeBtn.type = "button";
+  bargeBtn.id = "vm_st_barge_in_btn";
+  bargeBtn.addEventListener("click", options.triggerBargeIn);
+  actions.append(dictateBtn, bargeBtn);
+  content.appendChild(actions);
+  root.append(header, content);
+  hostContainer.appendChild(root);
+  return {
+    root,
+    refreshCharacter,
+    showOriginStatus,
+    setStatus(message) {
+      statusBadgeEl.textContent = message;
+    },
+    setDictationState(state) {
+      dictateBtn.textContent = state === "idle" ? text("dictate", "Dictate Mic") : text("stop_dictation", "Stop Dictation");
+    }
+  };
+}
+
+// src/ui-text.ts
+function createUiText(translate2) {
+  return (key, fallback, ...values) => {
+    const message = translate2?.(fallback, `voice_mode.${key}`) || fallback;
+    if (!values.length) return message;
+    return message.replace(
+      /\{(\d+)\}/g,
+      (placeholder, index) => values[Number(index)] ?? placeholder
+    );
+  };
+}
+
+// src/runtime.ts
 function createVoiceModeRuntime(host) {
   let activated = false;
   let emotionPromptRegistered = false;
@@ -6696,11 +7049,23 @@ function createVoiceModeRuntime(host) {
       return void 0;
     }
   };
-  let statusBadgeEl = null;
-  let insecureBannerEl = null;
-  let refreshCharVoiceUi = null;
-  const refreshStatusText = (msg) => {
-    if (statusBadgeEl) statusBadgeEl.textContent = msg;
+  const text = createUiText(host.translate);
+  let drawer;
+  const refreshStatusText = (message) => drawer?.setStatus(message);
+  const showMicError = (err) => {
+    lastError = formatSafeError(err, secretBroker.knownSecretsSnapshot());
+    let key = "mic_error";
+    switch (err instanceof Error ? err.name : "") {
+      case "NotAllowedError":
+        key = "mic_permission";
+        break;
+      case "ServiceNotAllowedError":
+        key = "mic_service";
+        break;
+      case "NotSupportedError":
+        key = "mic_unsupported";
+    }
+    refreshStatusText(text(key, "Mic: {0}", lastError));
   };
   const ttsHub = new VoiceModeTtsHub({
     getSettings,
@@ -6715,7 +7080,8 @@ function createVoiceModeRuntime(host) {
       }
       utteranceHistory.push(info);
       if (utteranceHistory.length > 50) utteranceHistory.shift();
-      refreshStatusText(`Speaking (${info.role}: ${info.voice || info.engine})`);
+      const role = text(info.role, info.role);
+      refreshStatusText(text("speaking", "Speaking ({0}: {1})", role, info.voice || info.engine));
     },
     onStateChange: (state) => {
       if (state === "playing") {
@@ -6727,7 +7093,7 @@ function createVoiceModeRuntime(host) {
         }
       } else if (state === "idle" && !isHostGenerating()) {
         void io.disarmBargeIn();
-        refreshStatusText("Ready");
+        refreshStatusText(text("ready", "Ready"));
       }
     },
     onDaemonFallback: (reason) => {
@@ -6735,11 +7101,11 @@ function createVoiceModeRuntime(host) {
         reason,
         secretBroker.knownSecretsSnapshot()
       );
-      refreshStatusText("Daemon offline -> System TTS fallback");
+      refreshStatusText(text("daemon_fallback", "Daemon offline -> System TTS fallback"));
     },
     onError: (err) => {
       lastError = formatSafeError(err, secretBroker.knownSecretsSnapshot());
-      refreshStatusText(`Error: ${lastError}`);
+      refreshStatusText(text("tts_error", "Error: {0}", lastError));
     }
   });
   const router = new StreamingUtteranceRouter({
@@ -6761,19 +7127,12 @@ function createVoiceModeRuntime(host) {
       ttsHub.cancel();
     },
     fetchImpl: host.fetchImpl,
-    onInsecureOrigin: (status) => {
-      if (insecureBannerEl && !status.secure) {
-        insecureBannerEl.textContent = status.remediation;
-        insecureBannerEl.hidden = false;
-      }
-    },
+    onInsecureOrigin: (status) => drawer?.showOriginStatus(status),
     onDictationStateChange: (state) => {
-      refreshStatusText(state === "idle" ? "Ready" : `Mic: ${state}`);
+      drawer?.setDictationState(state);
+      refreshStatusText(state === "idle" ? text("ready", "Ready") : text(`mic_${state}`, "Mic: {0}", state));
     },
-    onError: (err) => {
-      lastError = formatSafeError(err, secretBroker.knownSecretsSnapshot());
-      refreshStatusText(`Mic: ${lastError}`);
-    }
+    onError: showMicError
   });
   const syncEmotionPrompt = () => {
     const s = getSettings();
@@ -6807,6 +7166,13 @@ function createVoiceModeRuntime(host) {
     }
     cleanups.push(() => host.eventSource.removeListener(eventName, fn));
   };
+  const toggleDictation = () => {
+    if (io.activeDictationState !== "idle") {
+      void io.stopDictation().catch(showMicError);
+    } else {
+      void io.startDictation().catch(showMicError);
+    }
+  };
   const mountSettingsDrawer = (explicitDoc) => {
     const doc = explicitDoc ?? getDoc();
     if (!doc) return null;
@@ -6814,288 +7180,25 @@ function createVoiceModeRuntime(host) {
     if (existing) return existing;
     const hostContainer = doc.getElementById("extensions_settings") ?? doc.getElementById("extensions_settings2");
     if (!hostContainer) return null;
-    const settings = getSettings();
-    const root = makeEl(doc, "div", "inline-drawer vm-st-drawer");
-    root.id = "voice_mode_settings_drawer";
-    const header = makeEl(doc, "div", "inline-drawer-toggle inline-drawer-header");
-    const title = makeEl(doc, "b", void 0, "Voice Mode");
-    statusBadgeEl = makeEl(doc, "span", "vm-st-status-badge", "Ready");
-    const icon = makeEl(doc, "div", "inline-drawer-icon fa-solid fa-circle-chevron-down down");
-    header.append(title, statusBadgeEl, icon);
-    const content = makeEl(doc, "div", "inline-drawer-content vm-st-settings");
-    const originStatus = io.checkSecureOrigin();
-    insecureBannerEl = makeEl(
-      doc,
-      "div",
-      "vm-st-insecure-banner",
-      originStatus.remediation
-    );
-    insecureBannerEl.dataset.vmInsecureBanner = "true";
-    insecureBannerEl.hidden = originStatus.secure;
-    content.appendChild(insecureBannerEl);
-    const addCheckbox = (id, labelText, checked, onChange) => {
-      const row = makeEl(doc, "label", "checkbox_label vm-st-row");
-      const input = makeEl(doc, "input");
-      input.type = "checkbox";
-      input.id = id;
-      input.checked = checked;
-      input.addEventListener("change", () => onChange(input.checked));
-      row.append(input, makeEl(doc, "span", void 0, labelText));
-      content.appendChild(row);
-    };
-    addCheckbox("vm_st_enabled", "Enable Streaming Voice Mode", settings.enabled, (v) => {
-      updateSettings((d) => {
-        d.enabled = v;
-      });
-      if (!v) io.triggerBargeIn("manual");
+    drawer = buildSettingsDrawer(doc, hostContainer, {
+      text,
+      getSettings,
+      updateSettings,
+      resolveActiveSpeaker,
+      originStatus: io.checkSecureOrigin(),
+      triggerBargeIn: () => io.triggerBargeIn("manual"),
+      async saveSecret(slot, value) {
+        try {
+          await secretBroker.setSecret(slot, value);
+          refreshStatusText(value.trim() ? text("secret_saved", "Server secret saved.") : text("secret_deleted", "Server secret cleared."));
+        } catch (err) {
+          lastError = formatSafeError(err, [...secretBroker.knownSecretsSnapshot(), value.trim()]);
+          refreshStatusText(text("secret_failed", "Could not update the server secret. Check SillyTavern and try again."));
+        }
+      },
+      toggleDictation
     });
-    addCheckbox(
-      "vm_st_narration_split",
-      "Separate *Narration* and Dialogue Voices",
-      settings.narrationSplitEnabled,
-      (v) => updateSettings((d) => void (d.narrationSplitEnabled = v))
-    );
-    addCheckbox(
-      "vm_st_emotion_prompt",
-      "Inject Emotion Cue System Prompt (<whisper>, <break>)",
-      settings.emotionPromptEnabled,
-      (v) => updateSettings((d) => void (d.emotionPromptEnabled = v))
-    );
-    addCheckbox(
-      "vm_st_auto_send",
-      "Auto-Send Message After Voice Dictation",
-      settings.autoSendOnDictation,
-      (v) => updateSettings((d) => void (d.autoSendOnDictation = v))
-    );
-    addCheckbox(
-      "vm_st_use_server_proxy",
-      "Route Cloud TTS via Optional Server Plugin Proxy (/api/plugins/voice-mode)",
-      settings.useServerPluginProxy,
-      (v) => updateSettings((d) => void (d.useServerPluginProxy = v))
-    );
-    const datalist = makeEl(doc, "datalist");
-    datalist.id = "vm_st_kokoro_voices";
-    for (const preset of KOKORO_DEFAULT_SPEAKERS) {
-      const opt = makeEl(doc, "option");
-      opt.value = preset.id;
-      opt.textContent = `${preset.label} (${preset.lang})`;
-      datalist.appendChild(opt);
-    }
-    content.appendChild(datalist);
-    const makeSelect = (id, items, initial, onChange) => {
-      const sel = makeEl(doc, "select", "text_pole");
-      sel.id = id;
-      for (const [val, label] of items) {
-        const opt = makeEl(doc, "option", void 0, label);
-        opt.value = val;
-        opt.selected = val === initial;
-        sel.appendChild(opt);
-      }
-      if (onChange) sel.addEventListener("change", () => onChange(sel.value));
-      return sel;
-    };
-    const makeInput = (id, type, placeholder, initial = "") => {
-      const inp = makeEl(doc, "input", "text_pole");
-      inp.type = type;
-      inp.id = id;
-      inp.placeholder = placeholder;
-      inp.value = initial;
-      return inp;
-    };
-    const ENGINE_OPTIONS = [
-      ["system", "Browser System TTS (Zero Config)"],
-      ["kokoro-daemon", "Local Kokoro Daemon (103 Voices)"],
-      ["openai-compat", "OpenAI-Compatible BYOK TTS"],
-      ["mimo", "Xiaomi MiMo TTS"]
-    ];
-    const buildVoiceRow = (prefix, heading, currentEngine, currentVoice, onUpdate) => {
-      const wrap = makeEl(doc, "div", "vm-st-field-group");
-      wrap.appendChild(makeEl(doc, "label", void 0, heading));
-      const select = makeSelect(`${prefix}_engine`, ENGINE_OPTIONS, currentEngine);
-      const voiceInput = makeInput(
-        `${prefix}_voice`,
-        "text",
-        "Voice ID (zf_001, alloy, default)",
-        currentVoice
-      );
-      voiceInput.setAttribute("list", "vm_st_kokoro_voices");
-      const commit = () => onUpdate(select.value, voiceInput.value.trim());
-      select.addEventListener("change", commit);
-      voiceInput.addEventListener("change", commit);
-      wrap.append(select, voiceInput);
-      content.appendChild(wrap);
-    };
-    buildVoiceRow(
-      "vm_st_default",
-      "Default Character Voice",
-      settings.defaultVoice.engine,
-      settings.defaultVoice.voice,
-      (engine, voice) => updateSettings((d) => {
-        d.defaultVoice = { engine, voice };
-      })
-    );
-    buildVoiceRow(
-      "vm_st_narrator",
-      "Narrator Voice (*action*)",
-      settings.narratorVoice.engine,
-      settings.narratorVoice.voice,
-      (engine, voice) => updateSettings((d) => {
-        d.narratorVoice = { engine, voice };
-      })
-    );
-    const charWrap = makeEl(doc, "div", "vm-st-field-group");
-    charWrap.id = "vm_st_char_voice_section";
-    const charLabel = makeEl(doc, "label", void 0, "Active Character Voice Override");
-    charLabel.id = "vm_st_active_char_label";
-    const charEngineSelect = makeSelect(
-      "vm_st_char_engine",
-      [["", "Inherit Default Character Voice"], ...ENGINE_OPTIONS],
-      ""
-    );
-    const charVoiceInput = makeInput(
-      "vm_st_char_voice",
-      "text",
-      "Character Voice ID override"
-    );
-    charVoiceInput.setAttribute("list", "vm_st_kokoro_voices");
-    const charResetBtn = makeEl(
-      doc,
-      "button",
-      "menu_button",
-      "Reset Character Voice"
-    );
-    charResetBtn.type = "button";
-    charResetBtn.id = "vm_st_char_reset_btn";
-    const activeVoiceKey = () => {
-      const a = resolveActiveSpeaker();
-      return { key: a.avatar || a.speaker || "", label: a.speaker || a.avatar || "(None)" };
-    };
-    refreshCharVoiceUi = () => {
-      const { key, label } = activeVoiceKey();
-      const entry = key ? getSettings().voiceMap[key] : void 0;
-      charLabel.textContent = `Active Character Voice: ${label}`;
-      charEngineSelect.value = entry ? entry.engine : "";
-      charVoiceInput.value = entry ? entry.voice : "";
-      charEngineSelect.disabled = charVoiceInput.disabled = charResetBtn.disabled = !key;
-    };
-    const commitCharOverride = () => {
-      const { key } = activeVoiceKey();
-      if (!key) return;
-      const eng = charEngineSelect.value;
-      const v = charVoiceInput.value.trim();
-      updateSettings((d) => {
-        if (!eng && !v) delete d.voiceMap[key];
-        else d.voiceMap[key] = { engine: eng || d.defaultVoice.engine, voice: v };
-      });
-      refreshCharVoiceUi?.();
-    };
-    charEngineSelect.addEventListener("change", commitCharOverride);
-    charVoiceInput.addEventListener("change", commitCharOverride);
-    charResetBtn.addEventListener("click", () => {
-      const { key } = activeVoiceKey();
-      if (key) updateSettings((d) => void delete d.voiceMap[key]);
-      refreshCharVoiceUi?.();
-    });
-    charWrap.append(charLabel, charEngineSelect, charVoiceInput, charResetBtn);
-    content.appendChild(charWrap);
-    refreshCharVoiceUi();
-    const endpointsWrap = makeEl(doc, "div", "vm-st-field-group");
-    endpointsWrap.appendChild(makeEl(doc, "label", void 0, "Endpoint Base URLs"));
-    for (const [id, ph, key] of [
-      ["vm_st_openai_tts_base_url", "OpenAI TTS URL", "openaiTtsBaseUrl"],
-      ["vm_st_asr_base_url", "OpenAI ASR URL", "asrBaseUrl"],
-      ["vm_st_daemon_base_url", "Local Daemon URL", "daemonBaseUrl"]
-    ]) {
-      const inp = makeInput(id, "url", ph, settings[key]);
-      inp.addEventListener("change", () => {
-        updateSettings((d) => {
-          d[key] = inp.value.trim();
-        });
-        inp.value = getSettings()[key];
-      });
-      endpointsWrap.appendChild(inp);
-    }
-    content.appendChild(endpointsWrap);
-    const bargeWrap = makeEl(doc, "div", "vm-st-field-group");
-    bargeWrap.appendChild(makeEl(doc, "label", void 0, "Voice Barge-In & ASR Engine"));
-    const bargeSelect = makeSelect(
-      "vm_st_barge_mode",
-      [
-        ["detect", "AEC3 Auto-Detect (Safe Default)"],
-        ["auto", "Force Hands-Free Barge-In"],
-        ["manual", "Manual Button / Hotkey Only"]
-      ],
-      settings.bargeInMode,
-      (v) => updateSettings((d) => void (d.bargeInMode = v))
-    );
-    const asrSelect = makeSelect(
-      "vm_st_asr_engine",
-      [
-        ["system", "Browser SpeechRecognition ASR"],
-        ["daemon", "Local Voice Daemon ASR"],
-        ["openai-compat", "OpenAI-Compatible Whisper ASR"]
-      ],
-      settings.asrEngine,
-      (v) => updateSettings((d) => void (d.asrEngine = v))
-    );
-    bargeWrap.append(bargeSelect, asrSelect);
-    content.appendChild(bargeWrap);
-    const secretWrap = makeEl(doc, "div", "vm-st-field-group");
-    secretWrap.appendChild(makeEl(doc, "label", void 0, "Server Secrets (/api/secrets/write)"));
-    const slotSelect = makeSelect(
-      "vm_st_secret_slot",
-      [
-        ["openaiTts", "OpenAI-Compatible TTS Key"],
-        ["mimo", "MiMo TTS Key"],
-        ["asr", "OpenAI-Compatible ASR Key"],
-        ["daemon", "Local Voice Daemon Token"]
-      ],
-      "openaiTts"
-    );
-    const secretInput = makeInput("vm_st_secret_input", "password", "Paste secret key");
-    secretInput.autocomplete = "off";
-    const saveKeyBtn = makeEl(doc, "button", "menu_button", "Save Server Secret");
-    saveKeyBtn.type = "button";
-    saveKeyBtn.id = "vm_st_save_secret_btn";
-    saveKeyBtn.addEventListener("click", () => {
-      const slot = slotSelect.value;
-      const val = secretInput.value;
-      secretInput.value = "";
-      void secretBroker.setSecret(slot, val).then(() => refreshStatusText(`Saved ${slot} secret`));
-    });
-    secretWrap.append(slotSelect, secretInput, saveKeyBtn);
-    content.appendChild(secretWrap);
-    const actions = makeEl(doc, "div", "vm-st-actions");
-    const dictateBtn = makeEl(
-      doc,
-      "button",
-      "menu_button",
-      "Dictate Mic"
-    );
-    dictateBtn.type = "button";
-    dictateBtn.id = "vm_st_dictate_btn";
-    dictateBtn.disabled = !originStatus.secure;
-    dictateBtn.addEventListener("click", () => {
-      if (io.activeDictationState !== "idle") {
-        void io.stopDictation();
-      } else {
-        void io.startDictation();
-      }
-    });
-    const bargeBtn = makeEl(
-      doc,
-      "button",
-      "menu_button",
-      "Stop / Barge-In"
-    );
-    bargeBtn.type = "button";
-    bargeBtn.id = "vm_st_barge_in_btn";
-    bargeBtn.addEventListener("click", () => io.triggerBargeIn("manual"));
-    actions.append(dictateBtn, bargeBtn);
-    content.appendChild(actions);
-    root.append(header, content);
-    hostContainer.appendChild(root);
-    return root;
+    return drawer.root;
   };
   return {
     async activate() {
@@ -7166,10 +7269,10 @@ function createVoiceModeRuntime(host) {
         router.onChatChanged();
         ttsHub.cancel();
         void io.disarmBargeIn();
-        refreshCharVoiceUi?.();
+        drawer?.refreshCharacter();
       };
       subscribe(et.CHAT_CHANGED, resetAll);
-      subscribe(et.GROUP_UPDATED, () => refreshCharVoiceUi?.());
+      subscribe(et.GROUP_UPDATED, () => drawer?.refreshCharacter());
       subscribe(et.MESSAGE_SWIPED, resetAll);
       subscribe(et.MESSAGE_DELETED, resetAll);
       const doc = getDoc();
@@ -7180,11 +7283,7 @@ function createVoiceModeRuntime(host) {
             io.triggerBargeIn("manual");
           } else if (ev.altKey && ev.shiftKey && ev.code === "KeyV") {
             ev.preventDefault();
-            if (io.activeDictationState !== "idle") {
-              void io.stopDictation();
-            } else {
-              void io.startDictation();
-            }
+            toggleDictation();
           }
         };
         doc.addEventListener("keydown", onKeyDown);
@@ -7246,6 +7345,7 @@ async function activate() {
       stopGeneration,
       setExtensionPrompt,
       getRequestHeaders,
+      translate,
       secrets: {
         writeSecret: (key, value, label) => writeSecret(key, value, label),
         findSecret: (key) => findSecret(key),

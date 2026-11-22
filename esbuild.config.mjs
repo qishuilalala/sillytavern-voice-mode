@@ -5,6 +5,7 @@ const isProd = process.argv[2] === "production";
 const HOST_IMPORT_MAP = {
   "sillytavern/script": "../../../../../script.js",
   "sillytavern/extensions": "../../../../extensions.js",
+  "sillytavern/i18n": "../../../../i18n.js",
   "sillytavern/secrets": "../../../../secrets.js",
 };
 

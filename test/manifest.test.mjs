@@ -17,6 +17,10 @@ test("SillyTavern Git-install manifest and bundle contract", () => {
   assert.equal(manifest.hooks?.activate, "activate");
   assert.ok(fs.existsSync(path.join(root, manifest.css)));
   assert.ok(fs.existsSync(path.join(root, manifest.js)));
+  assert.match(fs.readFileSync(path.join(root, manifest.js), "utf8"), /from "\.\.\/\.\.\/\.\.\/\.\.\/i18n\.js"/);
+
+  const catalog = JSON.parse(fs.readFileSync(path.join(root, manifest.i18n["zh-cn"]), "utf8"));
+  assert.equal(catalog["voice_mode.title"], "语音模式");
 
   const gitignore = fs.readFileSync(path.join(root, ".gitignore"), "utf8");
   assert.doesNotMatch(gitignore, /^dist\/?$/m, "dist/ must stay tracked for SillyTavern one-click Git install");

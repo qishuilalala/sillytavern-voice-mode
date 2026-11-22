@@ -10,6 +10,7 @@ import {
   stopGeneration,
 } from "sillytavern/script";
 import { extension_settings, getContext } from "sillytavern/extensions";
+import { translate } from "sillytavern/i18n";
 import {
   canViewSecrets,
   deleteSecret,
@@ -61,6 +62,7 @@ export async function activate(): Promise<void> {
       stopGeneration,
       setExtensionPrompt,
       getRequestHeaders,
+      translate,
       secrets: {
         writeSecret: (key, value, label) => writeSecret(key, value, label),
         findSecret: (key) => findSecret(key),

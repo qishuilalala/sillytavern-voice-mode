@@ -128,6 +128,10 @@ declare module "sillytavern/extensions" {
   export const UNSET_VALUE: string;
 }
 
+declare module "sillytavern/i18n" {
+  export function translate(text: string, key?: string | null): string;
+}
+
 declare module "sillytavern/secrets" {
   export const SECRET_KEYS: Record<string, string>;
   export const secret_state: Record<string, unknown>;

@@ -129,6 +129,22 @@ interface BrowserSpeechRecognitionLike {
   abort(): void;
 }
 
+function webSpeechError(code: string, fallback?: unknown): unknown {
+  if (code === "not-allowed" || code === "NotAllowedError") {
+    return new DOMException(
+      "Microphone access was denied. Allow microphone access in the site settings and try again, or type your message.",
+      "NotAllowedError",
+    );
+  }
+  if (code === "service-not-allowed") {
+    return new DOMException(
+      "The browser denied access to its speech recognition service. Select another ASR engine or type your message.",
+      "ServiceNotAllowedError",
+    );
+  }
+  return fallback ?? new Error(`SpeechRecognition error: ${code}`);
+}
+
 export interface VoiceModeIoControllerOptions {
   getSettings: () => VoiceModeExtensionSettings;
   getSecret: (slot: SecretSlot) => Promise<string | null>;
@@ -155,6 +171,7 @@ export class VoiceModeIoController {
   private cloudSession: CloudDictationSession | null = null;
   private daemonAsrClient: DaemonClient | null = null;
   private systemRecognition: BrowserSpeechRecognitionLike | null = null;
+  private dictationGeneration = 0;
   private dictationState: DictationSessionState = "idle";
   private bargeInCount = 0;
 
@@ -268,12 +285,14 @@ export class VoiceModeIoController {
       return false;
     }
 
+    const generation = ++this.dictationGeneration;
     await this.stopDictation();
+    if (generation !== this.dictationGeneration) return false;
     this.triggerBargeIn("manual");
 
     const settings = this.options.getSettings();
     if (settings.asrEngine === "system") {
-      return this.startBrowserSpeechRecognition(settings);
+      return this.startBrowserSpeechRecognition(settings, generation);
     }
 
     const boundFetch: typeof fetch = this.options.fetchImpl
@@ -316,14 +335,17 @@ export class VoiceModeIoController {
   }
 
   async stopDictation(): Promise<void> {
-    if (this.systemRecognition) {
+    const recognition = this.systemRecognition;
+    if (recognition) {
       try {
-        this.systemRecognition.stop();
+        recognition.stop();
       } catch {
         // Ignore browser SpeechRecognition stop errors.
       }
-      this.systemRecognition = null;
-      this.setDictationState("idle");
+      if (this.systemRecognition === recognition) {
+        this.systemRecognition = null;
+        this.setDictationState("idle");
+      }
     }
     if (this.cloudSession) {
       await this.cloudSession.stop();
@@ -336,6 +358,7 @@ export class VoiceModeIoController {
   }
 
   async dispose(): Promise<void> {
+    ++this.dictationGeneration;
     await this.stopDictation();
     await this.monitor.stop();
     if (this.ownsVadWorker) {
@@ -350,6 +373,7 @@ export class VoiceModeIoController {
 
   private startBrowserSpeechRecognition(
     settings: VoiceModeExtensionSettings,
+    generation: number,
   ): boolean {
     const win = this.options.getWindow();
     const Ctor = (win?.SpeechRecognition ?? win?.webkitSpeechRecognition) as
@@ -357,21 +381,24 @@ export class VoiceModeIoController {
       | undefined;
     if (typeof Ctor !== "function") {
       this.options.onError?.(
-        new Error(
+        new DOMException(
           "Browser SpeechRecognition is unavailable; select OpenAI-Compatible or Local Voice Daemon ASR.",
+          "NotSupportedError",
         ),
       );
       return false;
     }
 
     const rec = new Ctor();
-    rec.lang =
-      settings.asrLanguage && settings.asrLanguage !== "auto"
-        ? settings.asrLanguage
-        : "en-US";
+    // An unset lang lets Web Speech inherit the document or browser language.
+    if (settings.asrLanguage && settings.asrLanguage !== "auto") {
+      rec.lang = settings.asrLanguage;
+    }
     rec.continuous = false;
     rec.interimResults = false;
     rec.onresult = (ev) => {
+      // stop() may still deliver a final transcript before end; replacing the session revokes it.
+      if (generation !== this.dictationGeneration) return;
       const parts: string[] = [];
       for (let i = 0; i < ev.results.length; i++) {
         const res = ev.results[i];
@@ -381,20 +408,33 @@ export class VoiceModeIoController {
       const joined = parts.join(" ").trim();
       if (joined) this.injectDictatedText(joined);
     };
-    rec.onerror = (ev) => {
-      if (ev.error && ev.error !== "no-speech" && ev.error !== "aborted") {
-        this.options.onError?.(new Error(`SpeechRecognition error: ${ev.error}`));
+    const finish = (error?: unknown): void => {
+      if (generation !== this.dictationGeneration) return;
+      ++this.dictationGeneration;
+      if (this.systemRecognition !== rec) return;
+      this.systemRecognition = null;
+      this.setDictationState("idle");
+      if (error !== undefined) {
+        // Browsers also emit end after an error. Show the diagnostic after resetting the mic.
+        rec.onresult = null;
+        this.options.onError?.(error);
       }
     };
-    rec.onend = () => {
-      if (this.systemRecognition === rec) {
-        this.systemRecognition = null;
-        this.setDictationState("idle");
+    rec.onerror = ({ error }) => {
+      if (error && error !== "no-speech" && error !== "aborted") {
+        finish(webSpeechError(error));
       }
     };
+    rec.onend = () => finish();
     this.systemRecognition = rec;
     this.setDictationState("listening");
-    rec.start();
-    return true;
+    try {
+      rec.start();
+      return true;
+    } catch (error) {
+      const name = error instanceof Error ? error.name : "";
+      finish(webSpeechError(name, error));
+      return false;
+    }
   }
 }

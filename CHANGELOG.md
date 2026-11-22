@@ -4,6 +4,10 @@ All notable changes to `sillytavern-voice-mode` are documented in this file.
 
 ## [0.1.0] - 2026-11-22
 
+### Changed
+
+- The extension settings and microphone status follow SillyTavern’s interface language, including Simplified Chinese. With the browser recognizer on automatic language selection, dictation uses the browser’s normal language selection. The microphone returns to idle after a permission error and keeps the recovery instructions visible.
+
 ### Added
 
 - **Streaming First-Sentence TTS (`STREAM_TOKEN_RECEIVED`)**: Cumulative-to-delta token slicer backed by `@voice-mode/core` `SentenceSegmenter` with `GENERATION_ENDED` tail flush and non-streaming `CHARACTER_MESSAGE_RENDERED` fallback.
