@@ -1,4 +1,5 @@
 import assert from "node:assert/strict";
+import { readFileSync } from "node:fs";
 import test from "node:test";
 
 import { EMOTION_PROMPT_KEY } from "../src/settings.ts";
@@ -290,13 +291,13 @@ function createMiniDom() {
   };
 }
 
-test("Settings drawer binds active character voiceMap overrides on CHAT_CHANGED and exposes endpoint + proxy controls", async () => {
+function createDrawerFixture({ translate, secrets, secure = true, firstCharacter = "Alice" } = {}) {
   const eventSource = createFakeEventSource();
   const doc = createMiniDom();
   const extensionSettings = { voice_mode: { enabled: true } };
   let activeIdx = 0;
   const characters = [
-    { name: "Alice", avatar: "alice.png" },
+    { name: firstCharacter, avatar: "alice.png" },
     { name: "Bob", avatar: "bob.png" },
   ];
 
@@ -333,11 +334,17 @@ test("Settings drawer binds active character voiceMap overrides on CHAT_CHANGED 
     stopGeneration: () => false,
     setExtensionPrompt: () => {},
     getRequestHeaders: () => ({}),
-    secrets: { writeSecret: async () => "1", findSecret: async () => null, deleteSecret: async () => {} },
-    getWindow: () => ({ isSecureContext: true, location: { protocol: "http:", host: "127.0.0.1:18123" } }),
+    translate,
+    secrets: secrets ?? { writeSecret: async () => "1", findSecret: async () => null, deleteSecret: async () => {} },
+    getWindow: () => ({ isSecureContext: secure, location: { protocol: "http:", host: "example.test:8000" } }),
     getDocument: () => doc,
   });
 
+  return { doc, runtime, eventSource, selectCharacter: (index) => { activeIdx = index; } };
+}
+
+test("Settings drawer binds active character voiceMap overrides on CHAT_CHANGED and exposes endpoint + proxy controls", async () => {
+  const { doc, runtime, eventSource, selectCharacter } = createDrawerFixture();
   await runtime.activate();
 
   const charLabel = doc.getElementById("vm_st_active_char_label");
@@ -363,14 +370,14 @@ test("Settings drawer binds active character voiceMap overrides on CHAT_CHANGED 
   });
 
   // Switch active character to Bob and emit CHAT_CHANGED -> UI refreshes to empty override
-  activeIdx = 1;
+  selectCharacter(1);
   await eventSource.emit("chat_id_changed", "c2");
   assert.match(charLabel.textContent, /Bob/);
   assert.equal(charEngine.value, "");
   assert.equal(charVoice.value, "");
 
   // Switch back to Alice -> UI restores Alice's override, then Reset clears it
-  activeIdx = 0;
+  selectCharacter(0);
   await eventSource.emit("chat_id_changed", "c1");
   assert.equal(charEngine.value, "kokoro-daemon");
   assert.equal(charVoice.value, "zf_001");
@@ -394,4 +401,79 @@ test("Settings drawer binds active character voiceMap overrides on CHAT_CHANGED 
   assert.equal(updated.useServerPluginProxy, true);
 
   await runtime.dispose();
+});
+
+
+const chineseCatalog = JSON.parse(readFileSync(new URL("../locales/zh-cn.json", import.meta.url), "utf8"));
+
+test("Settings drawer uses the SillyTavern locale and falls back to English per string", async (t) => {
+  const firstCharacter = '<img src=x> $& {0}';
+  const partialCatalog = { ...chineseCatalog };
+  delete partialCatalog["voice_mode.barge"];
+
+  for (const { name, catalog, chinese, barge } of [
+    { name: "Simplified Chinese", catalog: chineseCatalog, chinese: true, barge: "打断朗读与生成" },
+    { name: "another SillyTavern locale", catalog: {}, chinese: false, barge: "Stop / Barge-In" },
+    { name: "missing translation", catalog: partialCatalog, chinese: true, barge: "Stop / Barge-In" },
+  ]) {
+    await t.test(name, async () => {
+      const { doc, runtime } = createDrawerFixture({
+        firstCharacter,
+        secure: false,
+        translate: (fallback, key) => catalog[key] || fallback,
+      });
+      try {
+        await runtime.activate();
+        const drawer = doc.getElementById("voice_mode_settings_drawer");
+        const [header, content] = drawer.children;
+        assert.equal(header.children[0].textContent, chinese ? "语音模式" : "Voice Mode");
+        assert.equal(header.children[1].textContent, chinese ? "就绪" : "Ready");
+        assert.equal(
+          doc.getElementById("vm_st_active_char_label").textContent,
+          chinese ? '当前角色音色：' + firstCharacter : 'Active Character Voice: ' + firstCharacter,
+        );
+        const dictate = doc.getElementById("vm_st_dictate_btn");
+        assert.equal(dictate.textContent, chinese ? "开始听写" : "Dictate Mic");
+        assert.equal(dictate.disabled, true);
+        assert.equal(doc.getElementById("vm_st_barge_in_btn").textContent, barge);
+        const banner = content.children[0];
+        assert.equal(banner.hidden, false);
+        assert.match(banner.textContent, /http:\/\/example\.test:8000/);
+        assert.match(banner.textContent, chinese ? /远程访问时可使用 SSH/ : /forward the port over SSH/);
+        assert.deepEqual(
+          doc.getElementById("vm_st_asr_engine").children.map((option) => option.value),
+          ["system", "daemon", "openai-compat"],
+        );
+      } finally {
+        await runtime.dispose();
+      }
+    });
+  }
+});
+
+test("Settings drawer reports a rejected secret write in the selected locale", async () => {
+  const { doc, runtime } = createDrawerFixture({
+    translate: (fallback, key) => chineseCatalog[key] || fallback,
+    secrets: {
+      writeSecret: async () => null,
+      findSecret: async () => null,
+      deleteSecret: async () => {},
+    },
+  });
+  await runtime.activate();
+  try {
+    const secretInput = doc.getElementById("vm_st_secret_input");
+    const saveButton = doc.getElementById("vm_st_save_secret_btn");
+    doc.getElementById("vm_st_secret_slot").value = "asr";
+    secretInput.value = "sample-key";
+    saveButton.click();
+    assert.equal(saveButton.disabled, true);
+    await new Promise((resolve) => setImmediate(resolve));
+    const status = doc.getElementById("voice_mode_settings_drawer").children[0].children[1];
+    assert.match(status.textContent, /无法更新服务端密钥/);
+    assert.equal(saveButton.disabled, false);
+    assert.equal(secretInput.value, "");
+  } finally {
+    await runtime.dispose();
+  }
 });

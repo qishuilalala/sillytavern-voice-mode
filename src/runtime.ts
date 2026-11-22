@@ -1,8 +1,5 @@
-import {
-  KOKORO_DEFAULT_SPEAKERS,
-  buildEmotionPromptInstruction,
-} from "@voice-mode/core";
-import type { AudioSink, BargeInMode } from "@voice-mode/browser";
+import { buildEmotionPromptInstruction } from "@voice-mode/core";
+import type { AudioSink } from "@voice-mode/browser";
 import {
   EMOTION_PROMPT_KEY,
   SillyTavernSecretBroker,
@@ -11,8 +8,6 @@ import {
   type HostSecretsAdapter,
   type SecretSlot,
   type SecureOriginStatus,
-  type StAsrEngineKind,
-  type StTtsEngineKind,
   type VoiceModeExtensionSettings,
   type WindowOriginLike,
 } from "./settings.ts";
@@ -22,6 +17,8 @@ import {
   type UtterancePlaybackInfo,
 } from "./tts-hub.ts";
 import { VoiceModeIoController } from "./voice-io.ts";
+import { buildSettingsDrawer } from "./settings-drawer.ts";
+import { createUiText, type HostTranslate } from "./ui-text.ts";
 
 export interface HostEventSource {
   on(event: string, listener: (...args: unknown[]) => unknown): void;
@@ -78,6 +75,7 @@ export interface SillyTavernHostBridge {
   ) => void;
   getRequestHeaders: (options?: { omitContentType?: boolean }) => Record<string, string>;
   secrets: HostSecretsAdapter;
+  translate?: HostTranslate;
   fetchImpl?: typeof fetch;
   sink?: AudioSink;
   getWindow?: () => (WindowOriginLike & Record<string, unknown>) | null;
@@ -110,18 +108,6 @@ export interface VoiceModeRuntime {
   mountSettingsDrawer(doc?: Document | null): HTMLElement | null;
   waitUntilIdle(): Promise<void>;
   getDiagnostics(): VoiceModeDiagnostics;
-}
-
-function makeEl<K extends keyof HTMLElementTagNameMap>(
-  doc: Document,
-  tag: K,
-  className?: string,
-  text?: string,
-): HTMLElementTagNameMap[K] {
-  const node = doc.createElement(tag);
-  if (className) node.className = className;
-  if (text !== undefined) node.textContent = text;
-  return node;
 }
 
 export function createVoiceModeRuntime(host: SillyTavernHostBridge): VoiceModeRuntime {
@@ -190,11 +176,23 @@ export function createVoiceModeRuntime(host: SillyTavernHostBridge): VoiceModeRu
     }
   };
 
-  let statusBadgeEl: HTMLElement | null = null;
-  let insecureBannerEl: HTMLElement | null = null;
-  let refreshCharVoiceUi: (() => void) | null = null;
-  const refreshStatusText = (msg: string) => {
-    if (statusBadgeEl) statusBadgeEl.textContent = msg;
+  const text = createUiText(host.translate);
+  let drawer: ReturnType<typeof buildSettingsDrawer> | undefined;
+  const refreshStatusText = (message: string) => drawer?.setStatus(message);
+  const showMicError = (err: unknown) => {
+    lastError = formatSafeError(err, secretBroker.knownSecretsSnapshot());
+    let key = "mic_error";
+    switch (err instanceof Error ? err.name : "") {
+      case "NotAllowedError":
+        key = "mic_permission";
+        break;
+      case "ServiceNotAllowedError":
+        key = "mic_service";
+        break;
+      case "NotSupportedError":
+        key = "mic_unsupported";
+    }
+    refreshStatusText(text(key, "Mic: {0}", lastError));
   };
 
   const ttsHub = new VoiceModeTtsHub({
@@ -210,7 +208,8 @@ export function createVoiceModeRuntime(host: SillyTavernHostBridge): VoiceModeRu
       }
       utteranceHistory.push(info);
       if (utteranceHistory.length > 50) utteranceHistory.shift();
-      refreshStatusText(`Speaking (${info.role}: ${info.voice || info.engine})`);
+      const role = text(info.role, info.role);
+      refreshStatusText(text("speaking", "Speaking ({0}: {1})", role, info.voice || info.engine));
     },
     onStateChange: (state) => {
       if (state === "playing") {
@@ -222,7 +221,7 @@ export function createVoiceModeRuntime(host: SillyTavernHostBridge): VoiceModeRu
         }
       } else if (state === "idle" && !isHostGenerating()) {
         void io.disarmBargeIn();
-        refreshStatusText("Ready");
+        refreshStatusText(text("ready", "Ready"));
       }
     },
     onDaemonFallback: (reason) => {
@@ -230,11 +229,11 @@ export function createVoiceModeRuntime(host: SillyTavernHostBridge): VoiceModeRu
         reason,
         secretBroker.knownSecretsSnapshot(),
       );
-      refreshStatusText("Daemon offline -> System TTS fallback");
+      refreshStatusText(text("daemon_fallback", "Daemon offline -> System TTS fallback"));
     },
     onError: (err) => {
       lastError = formatSafeError(err, secretBroker.knownSecretsSnapshot());
-      refreshStatusText(`Error: ${lastError}`);
+      refreshStatusText(text("tts_error", "Error: {0}", lastError));
     },
   });
 
@@ -258,19 +257,14 @@ export function createVoiceModeRuntime(host: SillyTavernHostBridge): VoiceModeRu
       ttsHub.cancel();
     },
     fetchImpl: host.fetchImpl,
-    onInsecureOrigin: (status) => {
-      if (insecureBannerEl && !status.secure) {
-        insecureBannerEl.textContent = status.remediation;
-        insecureBannerEl.hidden = false;
-      }
-    },
+    onInsecureOrigin: (status) => drawer?.showOriginStatus(status),
     onDictationStateChange: (state) => {
-      refreshStatusText(state === "idle" ? "Ready" : `Mic: ${state}`);
+      drawer?.setDictationState(state);
+      refreshStatusText(state === "idle"
+        ? text("ready", "Ready")
+        : text(`mic_${state}`, "Mic: {0}", state));
     },
-    onError: (err) => {
-      lastError = formatSafeError(err, secretBroker.knownSecretsSnapshot());
-      refreshStatusText(`Mic: ${lastError}`);
-    },
+    onError: showMicError,
   });
 
   const syncEmotionPrompt = (): void => {
@@ -316,345 +310,45 @@ export function createVoiceModeRuntime(host: SillyTavernHostBridge): VoiceModeRu
     cleanups.push(() => host.eventSource.removeListener(eventName, fn));
   };
 
+  const toggleDictation = () => {
+    if (io.activeDictationState !== "idle") {
+      void io.stopDictation().catch(showMicError);
+    } else {
+      void io.startDictation().catch(showMicError);
+    }
+  };
+
   const mountSettingsDrawer = (explicitDoc?: Document | null): HTMLElement | null => {
     const doc = explicitDoc ?? getDoc();
     if (!doc) return null;
     const existing = doc.getElementById("voice_mode_settings_drawer");
     if (existing) return existing;
-
     const hostContainer =
       doc.getElementById("extensions_settings") ??
       doc.getElementById("extensions_settings2");
     if (!hostContainer) return null;
 
-    const settings = getSettings();
-    const root = makeEl(doc, "div", "inline-drawer vm-st-drawer");
-    root.id = "voice_mode_settings_drawer";
-
-    const header = makeEl(doc, "div", "inline-drawer-toggle inline-drawer-header");
-    const title = makeEl(doc, "b", undefined, "Voice Mode");
-    statusBadgeEl = makeEl(doc, "span", "vm-st-status-badge", "Ready");
-    const icon = makeEl(doc, "div", "inline-drawer-icon fa-solid fa-circle-chevron-down down");
-    header.append(title, statusBadgeEl, icon);
-
-    const content = makeEl(doc, "div", "inline-drawer-content vm-st-settings");
-
-    // Proactive Secure Context Banner
-    const originStatus = io.checkSecureOrigin();
-    insecureBannerEl = makeEl(
-      doc,
-      "div",
-      "vm-st-insecure-banner",
-      originStatus.remediation,
-    );
-    insecureBannerEl.dataset.vmInsecureBanner = "true";
-    insecureBannerEl.hidden = originStatus.secure;
-    content.appendChild(insecureBannerEl);
-
-    const addCheckbox = (
-      id: string,
-      labelText: string,
-      checked: boolean,
-      onChange: (next: boolean) => void,
-    ) => {
-      const row = makeEl(doc, "label", "checkbox_label vm-st-row");
-      const input = makeEl(doc, "input") as HTMLInputElement;
-      input.type = "checkbox";
-      input.id = id;
-      input.checked = checked;
-      input.addEventListener("change", () => onChange(input.checked));
-      row.append(input, makeEl(doc, "span", undefined, labelText));
-      content.appendChild(row);
-    };
-
-    addCheckbox("vm_st_enabled", "Enable Streaming Voice Mode", settings.enabled, (v) => {
-      updateSettings((d) => {
-        d.enabled = v;
-      });
-      if (!v) io.triggerBargeIn("manual");
+    drawer = buildSettingsDrawer(doc, hostContainer, {
+      text,
+      getSettings,
+      updateSettings,
+      resolveActiveSpeaker,
+      originStatus: io.checkSecureOrigin(),
+      triggerBargeIn: () => io.triggerBargeIn("manual"),
+      async saveSecret(slot, value) {
+        try {
+          await secretBroker.setSecret(slot, value);
+          refreshStatusText(value.trim()
+            ? text("secret_saved", "Server secret saved.")
+            : text("secret_deleted", "Server secret cleared."));
+        } catch (err) {
+          lastError = formatSafeError(err, [...secretBroker.knownSecretsSnapshot(), value.trim()]);
+          refreshStatusText(text("secret_failed", "Could not update the server secret. Check SillyTavern and try again."));
+        }
+      },
+      toggleDictation,
     });
-    addCheckbox(
-      "vm_st_narration_split",
-      "Separate *Narration* and Dialogue Voices",
-      settings.narrationSplitEnabled,
-      (v) => updateSettings((d) => void (d.narrationSplitEnabled = v)),
-    );
-    addCheckbox(
-      "vm_st_emotion_prompt",
-      "Inject Emotion Cue System Prompt (<whisper>, <break>)",
-      settings.emotionPromptEnabled,
-      (v) => updateSettings((d) => void (d.emotionPromptEnabled = v)),
-    );
-    addCheckbox(
-      "vm_st_auto_send",
-      "Auto-Send Message After Voice Dictation",
-      settings.autoSendOnDictation,
-      (v) => updateSettings((d) => void (d.autoSendOnDictation = v)),
-    );
-    addCheckbox(
-      "vm_st_use_server_proxy",
-      "Route Cloud TTS via Optional Server Plugin Proxy (/api/plugins/voice-mode)",
-      settings.useServerPluginProxy,
-      (v) => updateSettings((d) => void (d.useServerPluginProxy = v)),
-    );
-
-    const datalist = makeEl(doc, "datalist");
-    datalist.id = "vm_st_kokoro_voices";
-    for (const preset of KOKORO_DEFAULT_SPEAKERS) {
-      const opt = makeEl(doc, "option");
-      opt.value = preset.id;
-      opt.textContent = `${preset.label} (${preset.lang})`;
-      datalist.appendChild(opt);
-    }
-    content.appendChild(datalist);
-
-    const makeSelect = (
-      id: string,
-      items: ReadonlyArray<readonly [string, string]>,
-      initial: string,
-      onChange?: (val: string) => void,
-    ): HTMLSelectElement => {
-      const sel = makeEl(doc, "select", "text_pole");
-      sel.id = id;
-      for (const [val, label] of items) {
-        const opt = makeEl(doc, "option", undefined, label);
-        opt.value = val;
-        opt.selected = val === initial;
-        sel.appendChild(opt);
-      }
-      if (onChange) sel.addEventListener("change", () => onChange(sel.value));
-      return sel;
-    };
-
-    const makeInput = (
-      id: string,
-      type: string,
-      placeholder: string,
-      initial = "",
-    ): HTMLInputElement => {
-      const inp = makeEl(doc, "input", "text_pole");
-      inp.type = type;
-      inp.id = id;
-      inp.placeholder = placeholder;
-      inp.value = initial;
-      return inp;
-    };
-
-    const ENGINE_OPTIONS = [
-      ["system", "Browser System TTS (Zero Config)"],
-      ["kokoro-daemon", "Local Kokoro Daemon (103 Voices)"],
-      ["openai-compat", "OpenAI-Compatible BYOK TTS"],
-      ["mimo", "Xiaomi MiMo TTS"],
-    ] as const;
-
-    const buildVoiceRow = (
-      prefix: string,
-      heading: string,
-      currentEngine: StTtsEngineKind,
-      currentVoice: string,
-      onUpdate: (engine: StTtsEngineKind, voice: string) => void,
-    ) => {
-      const wrap = makeEl(doc, "div", "vm-st-field-group");
-      wrap.appendChild(makeEl(doc, "label", undefined, heading));
-      const select = makeSelect(`${prefix}_engine`, ENGINE_OPTIONS, currentEngine);
-      const voiceInput = makeInput(
-        `${prefix}_voice`,
-        "text",
-        "Voice ID (zf_001, alloy, default)",
-        currentVoice,
-      );
-      voiceInput.setAttribute("list", "vm_st_kokoro_voices");
-      const commit = () =>
-        onUpdate(select.value as StTtsEngineKind, voiceInput.value.trim());
-      select.addEventListener("change", commit);
-      voiceInput.addEventListener("change", commit);
-      wrap.append(select, voiceInput);
-      content.appendChild(wrap);
-    };
-
-    buildVoiceRow(
-      "vm_st_default",
-      "Default Character Voice",
-      settings.defaultVoice.engine,
-      settings.defaultVoice.voice,
-      (engine, voice) =>
-        updateSettings((d) => {
-          d.defaultVoice = { engine, voice };
-        }),
-    );
-    buildVoiceRow(
-      "vm_st_narrator",
-      "Narrator Voice (*action*)",
-      settings.narratorVoice.engine,
-      settings.narratorVoice.voice,
-      (engine, voice) =>
-        updateSettings((d) => {
-          d.narratorVoice = { engine, voice };
-        }),
-    );
-
-    const charWrap = makeEl(doc, "div", "vm-st-field-group");
-    charWrap.id = "vm_st_char_voice_section";
-    const charLabel = makeEl(doc, "label", undefined, "Active Character Voice Override");
-    charLabel.id = "vm_st_active_char_label";
-    const charEngineSelect = makeSelect(
-      "vm_st_char_engine",
-      [["", "Inherit Default Character Voice"], ...ENGINE_OPTIONS],
-      "",
-    );
-    const charVoiceInput = makeInput(
-      "vm_st_char_voice",
-      "text",
-      "Character Voice ID override",
-    );
-    charVoiceInput.setAttribute("list", "vm_st_kokoro_voices");
-    const charResetBtn = makeEl(
-      doc,
-      "button",
-      "menu_button",
-      "Reset Character Voice",
-    );
-    charResetBtn.type = "button";
-    charResetBtn.id = "vm_st_char_reset_btn";
-
-    const activeVoiceKey = () => {
-      const a = resolveActiveSpeaker();
-      return { key: a.avatar || a.speaker || "", label: a.speaker || a.avatar || "(None)" };
-    };
-    refreshCharVoiceUi = () => {
-      const { key, label } = activeVoiceKey();
-      const entry = key ? getSettings().voiceMap[key] : undefined;
-      charLabel.textContent = `Active Character Voice: ${label}`;
-      charEngineSelect.value = entry ? entry.engine : "";
-      charVoiceInput.value = entry ? entry.voice : "";
-      charEngineSelect.disabled = charVoiceInput.disabled = charResetBtn.disabled = !key;
-    };
-    const commitCharOverride = () => {
-      const { key } = activeVoiceKey();
-      if (!key) return;
-      const eng = charEngineSelect.value as StTtsEngineKind | "";
-      const v = charVoiceInput.value.trim();
-      updateSettings((d) => {
-        if (!eng && !v) delete d.voiceMap[key];
-        else d.voiceMap[key] = { engine: (eng || d.defaultVoice.engine) as StTtsEngineKind, voice: v };
-      });
-      refreshCharVoiceUi?.();
-    };
-    charEngineSelect.addEventListener("change", commitCharOverride);
-    charVoiceInput.addEventListener("change", commitCharOverride);
-    charResetBtn.addEventListener("click", () => {
-      const { key } = activeVoiceKey();
-      if (key) updateSettings((d) => void delete d.voiceMap[key]);
-      refreshCharVoiceUi?.();
-    });
-    charWrap.append(charLabel, charEngineSelect, charVoiceInput, charResetBtn);
-    content.appendChild(charWrap);
-    refreshCharVoiceUi();
-
-    const endpointsWrap = makeEl(doc, "div", "vm-st-field-group");
-    endpointsWrap.appendChild(makeEl(doc, "label", undefined, "Endpoint Base URLs"));
-    for (const [id, ph, key] of [
-      ["vm_st_openai_tts_base_url", "OpenAI TTS URL", "openaiTtsBaseUrl"],
-      ["vm_st_asr_base_url", "OpenAI ASR URL", "asrBaseUrl"],
-      ["vm_st_daemon_base_url", "Local Daemon URL", "daemonBaseUrl"],
-    ] as const) {
-      const inp = makeInput(id, "url", ph, settings[key]);
-      inp.addEventListener("change", () => {
-        updateSettings((d) => {
-          d[key] = inp.value.trim();
-        });
-        inp.value = getSettings()[key];
-      });
-      endpointsWrap.appendChild(inp);
-    }
-    content.appendChild(endpointsWrap);
-
-    const bargeWrap = makeEl(doc, "div", "vm-st-field-group");
-    bargeWrap.appendChild(makeEl(doc, "label", undefined, "Voice Barge-In & ASR Engine"));
-    const bargeSelect = makeSelect(
-      "vm_st_barge_mode",
-      [
-        ["detect", "AEC3 Auto-Detect (Safe Default)"],
-        ["auto", "Force Hands-Free Barge-In"],
-        ["manual", "Manual Button / Hotkey Only"],
-      ],
-      settings.bargeInMode,
-      (v) => updateSettings((d) => void (d.bargeInMode = v as BargeInMode)),
-    );
-    const asrSelect = makeSelect(
-      "vm_st_asr_engine",
-      [
-        ["system", "Browser SpeechRecognition ASR"],
-        ["daemon", "Local Voice Daemon ASR"],
-        ["openai-compat", "OpenAI-Compatible Whisper ASR"],
-      ],
-      settings.asrEngine,
-      (v) => updateSettings((d) => void (d.asrEngine = v as StAsrEngineKind)),
-    );
-    bargeWrap.append(bargeSelect, asrSelect);
-    content.appendChild(bargeWrap);
-
-    const secretWrap = makeEl(doc, "div", "vm-st-field-group");
-    secretWrap.appendChild(makeEl(doc, "label", undefined, "Server Secrets (/api/secrets/write)"));
-    const slotSelect = makeSelect(
-      "vm_st_secret_slot",
-      [
-        ["openaiTts", "OpenAI-Compatible TTS Key"],
-        ["mimo", "MiMo TTS Key"],
-        ["asr", "OpenAI-Compatible ASR Key"],
-        ["daemon", "Local Voice Daemon Token"],
-      ],
-      "openaiTts",
-    );
-    const secretInput = makeInput("vm_st_secret_input", "password", "Paste secret key");
-    secretInput.autocomplete = "off";
-    const saveKeyBtn = makeEl(doc, "button", "menu_button", "Save Server Secret");
-    saveKeyBtn.type = "button";
-    saveKeyBtn.id = "vm_st_save_secret_btn";
-    saveKeyBtn.addEventListener("click", () => {
-      const slot = slotSelect.value as SecretSlot;
-      const val = secretInput.value;
-      secretInput.value = "";
-      void secretBroker.setSecret(slot, val).then(() => refreshStatusText(`Saved ${slot} secret`));
-    });
-    secretWrap.append(slotSelect, secretInput, saveKeyBtn);
-    content.appendChild(secretWrap);
-
-    // Action Bar: Dictate & Manual Barge-In Stop
-    const actions = makeEl(doc, "div", "vm-st-actions");
-    const dictateBtn = makeEl(
-      doc,
-      "button",
-      "menu_button",
-      "Dictate Mic",
-    ) as HTMLButtonElement;
-    dictateBtn.type = "button";
-    dictateBtn.id = "vm_st_dictate_btn";
-    dictateBtn.disabled = !originStatus.secure;
-    dictateBtn.addEventListener("click", () => {
-      if (io.activeDictationState !== "idle") {
-        void io.stopDictation();
-      } else {
-        void io.startDictation();
-      }
-    });
-
-    const bargeBtn = makeEl(
-      doc,
-      "button",
-      "menu_button",
-      "Stop / Barge-In",
-    ) as HTMLButtonElement;
-    bargeBtn.type = "button";
-    bargeBtn.id = "vm_st_barge_in_btn";
-    bargeBtn.addEventListener("click", () => io.triggerBargeIn("manual"));
-
-    actions.append(dictateBtn, bargeBtn);
-    content.appendChild(actions);
-
-    root.append(header, content);
-    hostContainer.appendChild(root);
-    return root;
+    return drawer.root;
   };
 
   return {
@@ -728,10 +422,10 @@ export function createVoiceModeRuntime(host: SillyTavernHostBridge): VoiceModeRu
         router.onChatChanged();
         ttsHub.cancel();
         void io.disarmBargeIn();
-        refreshCharVoiceUi?.();
+        drawer?.refreshCharacter();
       };
       subscribe(et.CHAT_CHANGED, resetAll);
-      subscribe(et.GROUP_UPDATED, () => refreshCharVoiceUi?.());
+      subscribe(et.GROUP_UPDATED, () => drawer?.refreshCharacter());
       subscribe(et.MESSAGE_SWIPED, resetAll);
       subscribe(et.MESSAGE_DELETED, resetAll);
 
@@ -743,11 +437,7 @@ export function createVoiceModeRuntime(host: SillyTavernHostBridge): VoiceModeRu
             io.triggerBargeIn("manual");
           } else if (ev.altKey && ev.shiftKey && ev.code === "KeyV") {
             ev.preventDefault();
-            if (io.activeDictationState !== "idle") {
-              void io.stopDictation();
-            } else {
-              void io.startDictation();
-            }
+            toggleDictation();
           }
         };
         doc.addEventListener("keydown", onKeyDown);

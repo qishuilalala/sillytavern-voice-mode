@@ -255,12 +255,13 @@ export class SillyTavernSecretBroker {
       await this.deleteSecret(slot);
       return;
     }
-    this.ephemeral.set(slot, trimmed);
-    await this.host.writeSecret(
+    const id = await this.host.writeSecret(
       SECRET_SLOT_KEYS[slot],
       trimmed,
       `Voice Mode (${slot})`,
     );
+    if (id === null) throw new Error("SillyTavern did not save the secret.");
+    this.ephemeral.set(slot, trimmed);
   }
 
   async getSecret(slot: SecretSlot): Promise<string | null> {
@@ -288,8 +289,8 @@ export class SillyTavernSecretBroker {
   }
 
   async deleteSecret(slot: SecretSlot): Promise<void> {
-    this.ephemeral.delete(slot);
     await this.host.deleteSecret(SECRET_SLOT_KEYS[slot]);
+    this.ephemeral.delete(slot);
   }
 
   knownSecretsSnapshot(): string[] {

@@ -25,9 +25,9 @@ Please **do not** disclose security vulnerabilities in public GitHub issues, pul
 
 ### 2. Audio & Text Data Flows / 语音与文本数据流
 
-- **Local Browser / Companion Daemon Mode**:
-  - System speech (`window.speechSynthesis`), browser WASM engines, and the optional local `voice-daemon` (`http://127.0.0.1:18790`) process speech locally on your machine.
-  - When `voice-daemon` is unreachable, probing fails closed within `< 1s` without uploading data externally.
+- **Browser speech and local models / 浏览器语音与本机模型**:
+  - Browser synthesis uses the system voice selected by the browser. Browser speech recognition may use a vendor-operated speech service. 系统朗读是否联网取决于音色。浏览器语音识别可能把音频发给浏览器提供商。
+  - The optional daemon receives text and audio on loopback. If it becomes unavailable, Kokoro playback can fall back to system speech and daemon dictation can attempt the configured OpenAI-compatible transcription service. 本机服务断开后，Kokoro 朗读可改用系统语音；守护进程听写可尝试转交已配置的兼容转写接口。
 - **Optional BYOK TTS / STT Endpoints**:
   - Outbound requests to cloud speech providers occur **only** when explicitly configured and enabled by the user.
   - Only cleaned speakable utterance text (for TTS) or segmented utterance audio (for STT) is sent to your configured endpoint; this project operates **no relay server**.
