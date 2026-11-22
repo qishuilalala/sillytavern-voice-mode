@@ -23,6 +23,10 @@
     "check:release": "node scripts/check-release-gate.mjs",
     "check:all": "pnpm run typecheck && pnpm run lint && pnpm run test && pnpm run build && pnpm run check:release"
   },
+  "dependencies": {
+    "@voice-mode/browser": "file:./vendor/voice-mode-browser-0.1.0.tgz",
+    "@voice-mode/core": "file:./vendor/voice-mode-core-0.1.0.tgz"
+  },
   "devDependencies": {
     "@types/node": "^22.13.0",
     "esbuild": "^0.25.0",

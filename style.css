@@ -2,13 +2,42 @@
 .vm-st-settings {
   display: flex;
   flex-direction: column;
+  gap: 0.6rem;
+  padding: 0.4rem 0;
+}
+
+.vm-st-row {
+  display: flex;
+  align-items: center;
+  gap: 0.45rem;
+}
+
+.vm-st-field-group {
+  display: flex;
+  flex-direction: column;
+  gap: 0.35rem;
+}
+
+.vm-st-actions {
+  display: flex;
+  flex-wrap: wrap;
   gap: 0.5rem;
 }
 
 .vm-st-status-badge {
   display: inline-flex;
   align-items: center;
-  gap: 0.35rem;
-  font-size: 0.85em;
+  margin-left: auto;
+  margin-right: 0.5rem;
+  font-size: 0.82em;
   opacity: 0.85;
+}
+
+.vm-st-insecure-banner {
+  padding: 0.55rem 0.7rem;
+  border-radius: 6px;
+  border: 1px solid #d97706;
+  background: rgba(217, 119, 6, 0.14);
+  font-size: 0.85em;
+  line-height: 1.4;
 }

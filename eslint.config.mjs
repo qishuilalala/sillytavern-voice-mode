@@ -36,11 +36,16 @@ export default defineConfig([
     },
   },
   {
-    files: ["test/**/*.mjs"],
+    files: ["test/**/*.mjs", "server-plugin/**/*.mjs"],
+    extends: [...tseslint.configs.recommended],
     languageOptions: {
       ecmaVersion: 2022,
       sourceType: "module",
       globals: globals.node,
+    },
+    rules: {
+      "no-eval": "error",
+      "no-new-func": "error",
     },
   },
 ]);

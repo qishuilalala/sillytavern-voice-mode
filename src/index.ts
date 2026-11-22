@@ -1,52 +1,81 @@
-import { saveSettingsDebounced } from "sillytavern/script";
+import {
+  eventSource,
+  event_types,
+  extension_prompt_roles,
+  extension_prompt_types,
+  getRequestHeaders,
+  isGenerating,
+  saveSettingsDebounced,
+  setExtensionPrompt,
+  stopGeneration,
+} from "sillytavern/script";
 import { extension_settings, getContext } from "sillytavern/extensions";
+import {
+  canViewSecrets,
+  deleteSecret,
+  findSecret,
+  secret_state,
+  writeSecret,
+} from "sillytavern/secrets";
 
-export const EXTENSION_KEY = "voice_mode";
-export const EXTENSION_VERSION = "0.1.0";
+import {
+  DEFAULT_SETTINGS,
+  EMOTION_PROMPT_KEY,
+  EXTENSION_KEY,
+  EXTENSION_VERSION,
+  ensureExtensionSettings,
+  type VoiceModeExtensionSettings,
+} from "./settings.ts";
+import {
+  createVoiceModeRuntime,
+  type VoiceModeRuntime,
+} from "./runtime.ts";
 
-export interface VoiceModeExtensionSettings {
-  enabled: boolean;
-  emotionPromptEnabled: boolean;
-  voiceMap: Record<string, string>;
-}
+export {
+  DEFAULT_SETTINGS,
+  EMOTION_PROMPT_KEY,
+  EXTENSION_KEY,
+  EXTENSION_VERSION,
+  ensureExtensionSettings,
+  type VoiceModeExtensionSettings,
+  type VoiceModeRuntime,
+};
 
-export const DEFAULT_SETTINGS: Readonly<VoiceModeExtensionSettings> = Object.freeze({
-  enabled: false,
-  emotionPromptEnabled: false,
-  voiceMap: {},
-});
+let activeRuntime: VoiceModeRuntime | null = null;
 
-let activated = false;
-
-export function ensureExtensionSettings(
-  store: Record<string, unknown> = extension_settings,
-): VoiceModeExtensionSettings {
-  const raw = store[EXTENSION_KEY];
-  const existing =
-    raw && typeof raw === "object" && !Array.isArray(raw)
-      ? (raw as Partial<VoiceModeExtensionSettings>)
-      : {};
-  const merged: VoiceModeExtensionSettings = {
-    enabled: typeof existing.enabled === "boolean" ? existing.enabled : DEFAULT_SETTINGS.enabled,
-    emotionPromptEnabled:
-      typeof existing.emotionPromptEnabled === "boolean"
-        ? existing.emotionPromptEnabled
-        : DEFAULT_SETTINGS.emotionPromptEnabled,
-    voiceMap:
-      existing.voiceMap && typeof existing.voiceMap === "object" && !Array.isArray(existing.voiceMap)
-        ? { ...(existing.voiceMap as Record<string, string>) }
-        : {},
-  };
-  store[EXTENSION_KEY] = merged;
-  return merged;
+export function getVoiceModeRuntime(): VoiceModeRuntime | null {
+  return activeRuntime;
 }
 
 export async function activate(): Promise<void> {
-  if (activated) {
-    return;
+  if (!activeRuntime) {
+    activeRuntime = createVoiceModeRuntime({
+      eventSource,
+      eventTypes: event_types,
+      extensionPromptTypes: extension_prompt_types,
+      extensionPromptRoles: extension_prompt_roles,
+      extensionSettings: extension_settings,
+      getContext,
+      saveSettingsDebounced,
+      isGenerating,
+      stopGeneration,
+      setExtensionPrompt,
+      getRequestHeaders,
+      secrets: {
+        writeSecret: (key, value, label) => writeSecret(key, value, label),
+        findSecret: (key) => findSecret(key),
+        deleteSecret: (key) => deleteSecret(key),
+        canViewSecrets: () => canViewSecrets(),
+        hasRemoteSecret: (key) => {
+          const val = secret_state[key];
+          return Array.isArray(val) ? val.length > 0 : Boolean(val);
+        },
+      },
+    });
+    if (typeof window !== "undefined") {
+      (window as unknown as Record<string, unknown>).__sillyTavernVoiceMode =
+        activeRuntime;
+    }
   }
-  activated = true;
-  ensureExtensionSettings(extension_settings);
-  void getContext();
-  saveSettingsDebounced();
+  await activeRuntime.activate();
 }

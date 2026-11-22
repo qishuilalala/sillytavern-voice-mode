@@ -139,5 +139,6 @@ declare module "sillytavern/secrets" {
   ): Promise<string | null>;
   export function deleteSecret(key: string, id?: string): Promise<void>;
   export function readSecretState(): Promise<void>;
+  export function canViewSecrets(): Promise<boolean | null>;
   export function findSecret(key: string, id?: string): Promise<string | null>;
 }
