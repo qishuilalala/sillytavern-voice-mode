@@ -1,0 +1,10 @@
+node_modules/
+coverage/
+*.log
+.DS_Store
+.env
+.env.*
+
+# NOTE: Do NOT ignore manifest.json, style.css, or dist/.
+# SillyTavern's built-in Git installer (/api/extensions/install) clones this repository
+# directly without running npm/pnpm build; CI verifies dist/index.js has zero drift.

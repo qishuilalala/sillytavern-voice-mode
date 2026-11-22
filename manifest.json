@@ -1,0 +1,16 @@
+{
+  "display_name": "Voice Mode",
+  "loading_order": 20,
+  "requires": [],
+  "optional": [],
+  "js": "dist/index.js",
+  "css": "style.css",
+  "author": "qishuilalala",
+  "version": "0.1.0",
+  "homePage": "https://github.com/qishuilalala/sillytavern-voice-mode",
+  "auto_update": true,
+  "minimum_client_version": "1.19.1",
+  "hooks": {
+    "activate": "activate"
+  }
+}
