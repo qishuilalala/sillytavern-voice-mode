@@ -144,3 +144,16 @@ test("StreamingUtteranceRouter carries open <whisper> state across multi-sentenc
   assert.equal(emitted[1].text, "<whisper>Sentence two stays hushed.</whisper>");
   assert.equal(emitted[2].text, "Normal voice returns.");
 });
+
+test("a leading Markdown rule streams complete dialogue before the turn ends", () => {
+  const router = new StreamingUtteranceRouter();
+  router.onGenerationStarted({ speaker: "Alice" });
+  const start = "---\n\n第一句。第二句。";
+  const emitted = router.onStreamToken(start);
+  assert.deepEqual(emitted.map((utterance) => utterance.text), ["第一句。", "第二句。"]);
+  const rest = [
+    ...router.onStreamToken(start + "\n---\n第三句。"),
+    ...router.onGenerationEnded(),
+  ];
+  assert.deepEqual(rest.map((utterance) => utterance.text), ["第三句。"]);
+});
