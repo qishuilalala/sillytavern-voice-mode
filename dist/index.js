@@ -812,10 +812,11 @@ var ANY_EMOTION_CUE_RE = new RegExp(EMOTION_TAG_PATTERN, "i");
 function buildEmotionPromptInstruction(options = {}) {
   const allowWhisper = options.allowWhisper ?? true;
   const allowBreaks = options.allowBreaks ?? true;
+  const allowRoleplayNarration = options.allowRoleplayNarration ?? false;
   const rawMax = options.maxBreakMs ?? DEFAULT_PROMPT_MAX_BREAK_MS;
   const maxBreakMs = typeof rawMax === "number" && Number.isFinite(rawMax) ? Math.min(MAX_BREAK_MS, Math.max(100, Math.round(rawMax))) : DEFAULT_PROMPT_MAX_BREAK_MS;
   const parts = [
-    "Write natural spoken dialogue without Markdown formatting, bullet symbols, code fences, or stage-direction asterisks."
+    allowRoleplayNarration ? "Write natural spoken dialogue without Markdown code fences or bullet lists; apply emotion tags only to spoken dialogue." : "Write natural spoken dialogue without Markdown formatting, bullet symbols, code fences, or stage-direction asterisks."
   ];
   if (allowWhisper) {
     parts.push("For hushed or confidential phrases, wrap the phrase in balanced <whisper>...</whisper> tags and always close </whisper>.");
@@ -2331,11 +2332,13 @@ var DaemonClientError = class extends Error {
   }
 };
 var KOKORO_DEFAULT_SPEAKERS = [
-  { id: "zf_001", sid: 45, label: "Mandarin female (zf_001)", lang: "zh", gender: "F" },
-  { id: "zm_010", sid: 55, label: "Mandarin male (zm_010)", lang: "zh", gender: "M" },
-  { id: "af_heart", sid: 3, label: "English US female (af_heart)", lang: "en-us", gender: "F" },
-  { id: "am_adam", sid: 11, label: "English US male (am_adam)", lang: "en-us", gender: "M" },
-  { id: "bf_emma", sid: 21, label: "English UK female (bf_emma)", lang: "en-gb", gender: "F" }
+  { id: "zf_001", sid: 3, label: "Mandarin female (zf_001)", lang: "zh", gender: "F" },
+  { id: "zf_xiaobei", sid: 48, label: "Mandarin female (zf_xiaobei / zf_084)", lang: "zh", gender: "F" },
+  { id: "zm_010", sid: 59, label: "Mandarin male (zm_010)", lang: "zh", gender: "M" },
+  { id: "zm_013", sid: 62, label: "Mandarin deep male (zm_013)", lang: "zh", gender: "M" },
+  { id: "af_maple", sid: 0, label: "English US female (af_maple)", lang: "en-us", gender: "F" },
+  { id: "af_sol", sid: 1, label: "English US female (af_sol)", lang: "en-us", gender: "F" },
+  { id: "bf_vale", sid: 2, label: "English UK female (bf_vale)", lang: "en-gb", gender: "F" }
 ];
 function resolveDaemonBaseUrl(rawUrl) {
   const candidate = typeof rawUrl === "string" && rawUrl.trim().length > 0 ? rawUrl.trim() : DEFAULT_DAEMON_BASE_URL;
@@ -2597,13 +2600,12 @@ var DaemonClient = class {
     if (options?.signal?.aborted) {
       throw new DaemonClientError("aborted", "Daemon TTS synthesis was aborted");
     }
-    const cleaned = stripEmotionTags(text).trim();
-    if (cleaned.length === 0) {
+    if (stripEmotionTags(text).trim().length === 0) {
       return { audio: new Uint8Array(0), mime: "audio/wav" };
     }
     try {
       await this.ensureDaemonHealthy(options?.signal);
-      const result = await this.synthesizePrimary(cleaned, options);
+      const result = await this.synthesizePrimary(text, options);
       this.markHealthy();
       this.lastError = null;
       return result;
@@ -2628,7 +2630,7 @@ var DaemonClient = class {
       throw err;
     }
   }
-  async synthesizePrimary(cleanedText, options) {
+  async synthesizePrimary(rawText, options) {
     const ac = new AbortController();
     let timedOut = false;
     let localAborted = false;
@@ -2669,7 +2671,7 @@ var DaemonClient = class {
         headers,
         body: JSON.stringify({
           model: DEFAULT_KOKORO_MODEL,
-          input: cleanedText,
+          input: rawText,
           voice,
           speed: effectiveSpeed,
           response_format: "wav"
@@ -2977,11 +2979,12 @@ var VALID_TTS_ENGINES = /* @__PURE__ */ new Set([
 ]);
 var VALID_ASR_ENGINES = /* @__PURE__ */ new Set(["system", "openai-compat", "daemon"]);
 var VALID_BARGE_IN_MODES = /* @__PURE__ */ new Set(["detect", "auto", "manual"]);
-var SECRET_LIKE_VALUE_RE = /^(?:sk-[A-Za-z0-9_-]{12,}|Bearer\s+\S+)/i;
 function sanitizeCleanString(val, fallback = "") {
   if (typeof val !== "string") return fallback;
   const trimmed = val.trim();
-  if (SECRET_LIKE_VALUE_RE.test(trimmed)) return fallback;
+  if (trimmed.length > 0 && redactSecrets(trimmed) !== trimmed) {
+    return fallback;
+  }
   return trimmed;
 }
 function normalizeVoiceAssignment(raw, fallbackEngine = "system") {
@@ -3121,7 +3124,7 @@ function inspectSecureOrigin(win) {
   const host = win?.location?.host ?? "unknown-host";
   const protocol = win?.location?.protocol ?? "http:";
   const originLabel = `${protocol}//${host}`;
-  if (win?.isSecureContext !== false) {
+  if (Boolean(win && win.isSecureContext === true)) {
     return {
       secure: true,
       originLabel,
@@ -3157,6 +3160,21 @@ function commonPrefixLength(a, b) {
 function cleanOuterQuotes(text) {
   return text.replace(/^["“”「」『』\s]+|["“”「」『』\s]+$/g, "").trim();
 }
+function splitTerminalWhisperBoundaries(raw) {
+  const out = [];
+  const re = /([.!?。！？]["'”’)]?\s*<\s*\/whisper\s*>)\s+/gi;
+  let last = 0;
+  for (const m of raw.matchAll(re)) {
+    const idx = m.index ?? 0;
+    const endOfClose = idx + (m[1]?.length ?? 0);
+    const head = raw.slice(last, endOfClose).trim();
+    if (head) out.push(head);
+    last = idx + m[0].length;
+  }
+  const tail = raw.slice(last).trim();
+  if (tail) out.push(tail);
+  return out;
+}
 var StreamingUtteranceRouter = class {
   narrationSplitEnabled;
   segmenterOptions;
@@ -3172,6 +3190,7 @@ var StreamingUtteranceRouter = class {
   activeAvatar = void 0;
   inNarration = false;
   pendingStar = false;
+  inOpenWhisper = false;
   constructor(options = {}) {
     this.narrationSplitEnabled = options.narrationSplitEnabled ?? true;
     this.segmenterOptions = options.segmenterOptions;
@@ -3281,23 +3300,57 @@ var StreamingUtteranceRouter = class {
     this.activeAvatar = void 0;
     this.inNarration = false;
     this.pendingStar = false;
+    this.inOpenWhisper = false;
     this.segmenter.flush();
+  }
+  balanceSentenceWhisper(raw) {
+    const seeded = this.inOpenWhisper ? `<whisper>${raw}` : raw;
+    let depth = 0;
+    let rebuilt = "";
+    let lastIdx = 0;
+    const tagRe = /<\s*(\/?)\s*whisper\s*>/gi;
+    for (const match of seeded.matchAll(tagRe)) {
+      const idx = match.index ?? 0;
+      rebuilt += seeded.slice(lastIdx, idx);
+      lastIdx = idx + match[0].length;
+      const isClosing = match[1] === "/";
+      if (!isClosing) {
+        if (depth === 0) rebuilt += "<whisper>";
+        depth++;
+      } else if (depth > 0) {
+        depth--;
+        if (depth === 0) rebuilt += "</whisper>";
+      }
+    }
+    rebuilt += seeded.slice(lastIdx);
+    if (depth > 0) {
+      rebuilt += "</whisper>";
+      this.inOpenWhisper = true;
+    } else {
+      this.inOpenWhisper = false;
+    }
+    const collapsed = rebuilt.replace(/<\s*whisper\s*>\s*<\s*\/whisper\s*>/gi, "").trim();
+    const textWithoutWhisper = collapsed.replace(/<\s*\/?\s*whisper\s*>/gi, "").trim();
+    return textWithoutWhisper ? collapsed : "";
   }
   currentRole() {
     return this.narrationSplitEnabled && this.inNarration ? "narrator" : "character";
   }
   emitSentences(sentences, role, speaker, avatar, out) {
-    for (const raw of sentences) {
-      const cleaned = role === "character" ? cleanOuterQuotes(raw) : raw.trim();
-      if (!cleaned) continue;
-      const utterance = {
-        role,
-        speaker,
-        ...avatar ? { avatar } : {},
-        text: cleaned
-      };
-      out.push(utterance);
-      this.onUtterance?.(utterance);
+    for (const rawSentence of sentences) {
+      for (const raw of splitTerminalWhisperBoundaries(rawSentence)) {
+        const preCleaned = role === "character" ? cleanOuterQuotes(raw) : raw.trim();
+        const cleaned = this.balanceSentenceWhisper(preCleaned);
+        if (!cleaned) continue;
+        const utterance = {
+          role,
+          speaker,
+          ...avatar ? { avatar } : {},
+          text: cleaned
+        };
+        out.push(utterance);
+        this.onUtterance?.(utterance);
+      }
     }
   }
   ingestDelta(delta, speaker, avatar) {
@@ -3342,6 +3395,7 @@ var StreamingUtteranceRouter = class {
           buf = "";
         }
         this.emitSentences(this.segmenter.flush(), roleBefore, speaker, avatar, out);
+        this.inOpenWhisper = false;
         this.inNarration = !this.inNarration;
         i++;
         continue;
@@ -3371,6 +3425,7 @@ var StreamingUtteranceRouter = class {
     }
     this.emitSentences(this.segmenter.flush(), role, speaker, avatar, out);
     this.inNarration = false;
+    this.inOpenWhisper = false;
     return out;
   }
 };
@@ -6379,6 +6434,40 @@ function abortableDelay(ms, signal) {
     signal.addEventListener("abort", onAbort, { once: true });
   });
 }
+function computeLeadingBreakMs(rawText) {
+  let sum = 0;
+  let rest = rawText;
+  const leadRe = /^\s*<\s*break\s+(\d+)\s*ms\s*>/i;
+  while (true) {
+    const m = leadRe.exec(rest);
+    if (!m) break;
+    sum += Math.min(5e3, Math.max(0, Number(m[1] ?? 0)));
+    rest = rest.slice(m[0].length);
+  }
+  return Math.min(1e4, sum);
+}
+function buildSystemTtsSegments(rawText, segments) {
+  if (segments.length === 0) return [];
+  const leadingBreak = computeLeadingBreakMs(rawText);
+  return segments.map((seg, idx) => {
+    const attached = Math.max(0, Math.min(5e3, seg.preBreakMs ?? 0));
+    if (idx === 0 && leadingBreak > 0) {
+      const pre = Math.min(leadingBreak, attached);
+      return {
+        text: seg.text,
+        whisper: seg.whisper,
+        preBreakMs: pre,
+        breakAfterMs: Math.max(0, attached - pre)
+      };
+    }
+    return {
+      text: seg.text,
+      whisper: seg.whisper,
+      preBreakMs: 0,
+      breakAfterMs: attached
+    };
+  });
+}
 var SystemTtsEngine = class {
   kind = "system";
   mime = SYSTEM_TTS_MIME;
@@ -6391,12 +6480,12 @@ var SystemTtsEngine = class {
     }
   }
   async synthesize(text, options) {
+    const segments = options?.segments && options.segments.length > 0 ? options.segments : [{ text, whisper: false, preBreakMs: 0, breakAfterMs: 0 }];
     const payload = {
       text,
       voice: options?.voice ?? this.defaultVoice,
       rate: options?.rate ?? this.defaultRate,
-      preBreakMs: Math.max(0, Math.min(3e3, options?.preBreakMs ?? 0)),
-      whisper: Boolean(options?.whisper)
+      segments
     };
     return {
       audio: new TextEncoder().encode(JSON.stringify(payload)),
@@ -6416,8 +6505,9 @@ var SystemTtsEngine = class {
   }
 };
 var BrowserAudioSink = class {
-  activeAudio = null;
+  sharedAudio = null;
   activeObjectUrl = null;
+  audioPlaying = false;
   async play(payload, signal) {
     if (signal.aborted) return;
     if (payload.mime === SYSTEM_TTS_MIME) {
@@ -6427,21 +6517,21 @@ var BrowserAudioSink = class {
     await this.playAudioBytes(payload, signal);
   }
   pause() {
-    if (this.activeAudio) {
-      this.activeAudio.pause();
+    if (this.audioPlaying && this.sharedAudio) {
+      this.sharedAudio.pause();
     } else if (typeof window !== "undefined" && "speechSynthesis" in window) {
       window.speechSynthesis.pause();
     }
   }
   resume() {
-    if (this.activeAudio) {
-      void this.activeAudio.play().catch(() => void 0);
+    if (this.audioPlaying && this.sharedAudio) {
+      void this.sharedAudio.play().catch(() => void 0);
     } else if (typeof window !== "undefined" && "speechSynthesis" in window) {
       window.speechSynthesis.resume();
     }
   }
   stop() {
-    this.cleanupAudioElement();
+    this.resetSharedAudio();
     if (typeof window !== "undefined" && "speechSynthesis" in window) {
       try {
         window.speechSynthesis.cancel();
@@ -6449,15 +6539,17 @@ var BrowserAudioSink = class {
       }
     }
   }
-  cleanupAudioElement() {
-    if (this.activeAudio) {
+  resetSharedAudio() {
+    this.audioPlaying = false;
+    if (this.sharedAudio) {
       try {
-        this.activeAudio.pause();
-        this.activeAudio.removeAttribute("src");
-        this.activeAudio.load();
+        this.sharedAudio.onended = null;
+        this.sharedAudio.onerror = null;
+        this.sharedAudio.pause();
+        this.sharedAudio.removeAttribute("src");
+        this.sharedAudio.load();
       } catch {
       }
-      this.activeAudio = null;
     }
     if (this.activeObjectUrl && typeof URL !== "undefined") {
       try {
@@ -6467,19 +6559,13 @@ var BrowserAudioSink = class {
       this.activeObjectUrl = null;
     }
   }
-  async playSystemUtterance(encoded, signal) {
-    const parsed = JSON.parse(
-      new TextDecoder().decode(encoded)
-    );
-    if (parsed.preBreakMs > 0) {
-      await abortableDelay(parsed.preBreakMs, signal);
-    }
-    if (signal.aborted || !parsed.text.trim()) return;
+  async speakSingleSystemSegment(text, voiceName, rate, whisper, signal) {
+    if (signal.aborted || !text.trim()) return;
     const synth = typeof window !== "undefined" && "speechSynthesis" in window ? window.speechSynthesis : null;
     const UtteranceCtor = typeof SpeechSynthesisUtterance !== "undefined" ? SpeechSynthesisUtterance : null;
     const voices = synth ? synth.getVoices() : [];
     if (!synth || !UtteranceCtor || voices.length === 0) {
-      const durationMs = Math.min(900, Math.max(140, parsed.text.length * 16));
+      const durationMs = Math.min(900, Math.max(100, text.length * 16));
       await abortableDelay(durationMs, signal);
       return;
     }
@@ -6499,18 +6585,18 @@ var BrowserAudioSink = class {
         }
         finish();
       };
-      const utterance = new UtteranceCtor(parsed.text);
-      if (parsed.voice) {
+      const utterance = new UtteranceCtor(text);
+      if (voiceName) {
         const matched = voices.find(
-          (v) => v.name === parsed.voice || v.voiceURI === parsed.voice || v.lang === parsed.voice
+          (v) => v.name === voiceName || v.voiceURI === voiceName || v.lang === voiceName
         );
         if (matched) utterance.voice = matched;
       }
-      utterance.rate = parsed.rate || 1;
-      utterance.volume = parsed.whisper ? 0.65 : 1;
+      utterance.rate = rate || 1;
+      utterance.volume = whisper ? 0.65 : 1;
       utterance.onend = finish;
       utterance.onerror = finish;
-      const maxExpectedMs = Math.min(2e4, Math.max(2500, parsed.text.length * 120));
+      const maxExpectedMs = Math.min(2e4, Math.max(2500, text.length * 120));
       const safetyTimer = setTimeout(finish, maxExpectedMs);
       signal.addEventListener("abort", onAbort, { once: true });
       try {
@@ -6521,26 +6607,51 @@ var BrowserAudioSink = class {
       }
     });
   }
+  async playSystemUtterance(encoded, signal) {
+    const parsed = JSON.parse(
+      new TextDecoder().decode(encoded)
+    );
+    const segs = Array.isArray(parsed.segments) && parsed.segments.length > 0 ? parsed.segments : [{ text: parsed.text, whisper: false, preBreakMs: 0, breakAfterMs: 0 }];
+    for (const seg of segs) {
+      if (signal.aborted) return;
+      if (seg.preBreakMs > 0) {
+        await abortableDelay(seg.preBreakMs, signal);
+      }
+      if (signal.aborted) return;
+      await this.speakSingleSystemSegment(
+        seg.text,
+        parsed.voice,
+        parsed.rate,
+        seg.whisper,
+        signal
+      );
+      if (signal.aborted) return;
+      if (seg.breakAfterMs > 0) {
+        await abortableDelay(seg.breakAfterMs, signal);
+      }
+    }
+  }
   async playAudioBytes(payload, signal) {
     if (typeof Audio === "undefined" || typeof URL === "undefined") {
       await abortableDelay(80, signal);
       return;
     }
-    this.cleanupAudioElement();
+    this.resetSharedAudio();
     const copy = new Uint8Array(payload.audio.byteLength);
     copy.set(payload.audio);
     const blob = new Blob([copy], { type: payload.mime || "audio/wav" });
     const objectUrl = URL.createObjectURL(blob);
-    const audio = new Audio(objectUrl);
+    const audio = this.sharedAudio ??= new Audio();
+    audio.src = objectUrl;
     this.activeObjectUrl = objectUrl;
-    this.activeAudio = audio;
+    this.audioPlaying = true;
     await new Promise((resolve) => {
       let settled = false;
       const finish = () => {
         if (settled) return;
         settled = true;
         signal.removeEventListener("abort", onAbort);
-        this.cleanupAudioElement();
+        this.resetSharedAudio();
         resolve();
       };
       const onAbort = () => {
@@ -6578,6 +6689,7 @@ function resolveUtteranceVoice(utterance, settings, cardVoiceRaw) {
   }
   return settings.defaultVoice;
 }
+var SERVER_PLUGIN_HEALTH_TTL_MS = 15e3;
 var VoiceModeTtsHub = class {
   options;
   systemEngine = new SystemTtsEngine();
@@ -6585,6 +6697,7 @@ var VoiceModeTtsHub = class {
   queue;
   daemonClient = null;
   daemonClientUrl = "";
+  serverPluginState = null;
   pendingInfo = /* @__PURE__ */ new Map();
   seq = 0;
   lastUsesSystemTts = true;
@@ -6672,6 +6785,38 @@ var VoiceModeTtsHub = class {
     }
     return (input, init) => globalThis.fetch(input, init);
   }
+  async isServerPluginHealthy(baseFetch) {
+    const now = Date.now();
+    if (this.serverPluginState && now < this.serverPluginState.expiresAt) {
+      return this.serverPluginState.available;
+    }
+    try {
+      const res = await baseFetch("/api/plugins/voice-mode/health", {
+        method: "GET",
+        signal: AbortSignal.timeout(800)
+      });
+      if (!res.ok) {
+        this.serverPluginState = {
+          available: false,
+          expiresAt: now + SERVER_PLUGIN_HEALTH_TTL_MS
+        };
+        return false;
+      }
+      const data = await res.json();
+      const available = data?.ok === true && data?.id === "voice-mode";
+      this.serverPluginState = {
+        available,
+        expiresAt: now + SERVER_PLUGIN_HEALTH_TTL_MS
+      };
+      return available;
+    } catch {
+      this.serverPluginState = {
+        available: false,
+        expiresAt: now + SERVER_PLUGIN_HEALTH_TTL_MS
+      };
+      return false;
+    }
+  }
   getOrCreateDaemonClient(settings) {
     if (this.daemonClient && this.daemonClientUrl === settings.daemonBaseUrl) {
       return this.daemonClient;
@@ -6691,13 +6836,16 @@ var VoiceModeTtsHub = class {
     this.daemonClientUrl = settings.daemonBaseUrl;
     return this.daemonClient;
   }
-  buildFetchForByok(settings, slot) {
+  buildFetchForByok(settings, slot, presetId, customBaseUrl) {
     const baseFetch = this.getBoundFetch();
     if (!settings.useServerPluginProxy) {
       return baseFetch;
     }
     return async (input, init) => {
-      const targetUrl = typeof input === "string" ? input : input instanceof URL ? input.toString() : input.url;
+      const pluginReady = await this.isServerPluginHealthy(baseFetch);
+      if (!pluginReady) {
+        return baseFetch(input, init);
+      }
       const stHeaders = this.options.getRequestHeaders?.() ?? {
         "Content-Type": "application/json"
       };
@@ -6705,7 +6853,8 @@ var VoiceModeTtsHub = class {
         method: "POST",
         headers: stHeaders,
         body: JSON.stringify({
-          targetUrl,
+          presetId,
+          ...customBaseUrl ? { customBaseUrl } : {},
           secretSlot: slot,
           upstreamBody: init?.body ? String(init.body) : "{}"
         }),
@@ -6726,11 +6875,6 @@ var VoiceModeTtsHub = class {
     if (!plan.plainText.trim()) {
       return null;
     }
-    const totalBreakMs = plan.segments.reduce(
-      (sum, seg) => sum + (seg.preBreakMs ?? 0),
-      0
-    );
-    const isWhisper = plan.segments.length > 0 && plan.segments.every((seg) => seg.whisper);
     this.pendingInfo.set(envelopeStr, {
       role: parsed.role,
       speaker: parsed.speaker,
@@ -6743,20 +6887,19 @@ var VoiceModeTtsHub = class {
       startedAtMs: 0
     });
     if (assignment.engine === "system") {
+      const sysSegments = buildSystemTtsSegments(parsed.text, plan.segments);
       return this.systemEngine.synthesize(plan.plainText, {
         voice: assignment.voice,
         rate: assignment.rate,
         signal,
-        preBreakMs: totalBreakMs,
-        whisper: isWhisper
+        segments: sysSegments
       });
     }
     if (assignment.engine === "kokoro-daemon") {
       const client = this.getOrCreateDaemonClient(settings);
-      const effectiveRate = isWhisper ? (assignment.rate ?? 1) * 0.92 : assignment.rate;
-      const res = await client.synthesize(plan.plainText, {
+      const res = await client.synthesize(parsed.text, {
         voice: assignment.voice || void 0,
-        rate: effectiveRate,
+        rate: assignment.rate,
         signal
       });
       if (res.mime === SYSTEM_TTS_MIME) {
@@ -6773,7 +6916,7 @@ var VoiceModeTtsHub = class {
         apiKey: () => this.options.getSecret("mimo"),
         instructions: plan.instructions || void 0,
         fallback: () => this.systemEngine,
-        fetchImpl: this.buildFetchForByok(settings, "mimo")
+        fetchImpl: this.buildFetchForByok(settings, "mimo", "mimo")
       });
       return engine2.synthesize(plan.plainText, {
         voice: assignment.voice || void 0,
@@ -6781,15 +6924,21 @@ var VoiceModeTtsHub = class {
         signal
       });
     }
+    const effectivePresetId = assignment.presetId ?? settings.openaiTtsPresetId;
     const engine = new OpenAiCompatTtsEngine({
-      presetId: assignment.presetId ?? settings.openaiTtsPresetId,
+      presetId: effectivePresetId,
       baseUrl: settings.openaiTtsBaseUrl,
       model: settings.openaiTtsModel,
       voice: assignment.voice || void 0,
       apiKey: () => this.options.getSecret("openaiTts"),
       instructions: plan.instructions || void 0,
       fallback: () => this.systemEngine,
-      fetchImpl: this.buildFetchForByok(settings, "openaiTts")
+      fetchImpl: this.buildFetchForByok(
+        settings,
+        "openaiTts",
+        effectivePresetId,
+        effectivePresetId === "custom" ? settings.openaiTtsBaseUrl : void 0
+      )
     });
     return engine.synthesize(plan.plainText, {
       voice: assignment.voice || void 0,
@@ -6800,6 +6949,7 @@ var VoiceModeTtsHub = class {
 };
 
 // src/voice-io.ts
+var ENERGY_VAD_CONFIRM_CHUNKS = 5;
 function computeZeroCrossingRate(samples) {
   if (samples.length < 2) return 0;
   let crossings = 0;
@@ -6810,9 +6960,18 @@ function computeZeroCrossingRate(samples) {
   }
   return crossings / (samples.length - 1);
 }
-function createEnergyVadWorkerClient(minSpeechRms = 0.012) {
+function computeCrestFactor(samples, rms) {
+  if (rms <= 0 || samples.length === 0) return Infinity;
+  let peak = 0;
+  for (let i = 0; i < samples.length; i++) {
+    const abs = Math.abs(samples[i]);
+    if (abs > peak) peak = abs;
+  }
+  return peak / rms;
+}
+function createEnergyVadWorkerClient(minSpeechRms = 0.015) {
   return new SherpaWorkerClient({
-    createWorkerSource: () => "/* voice-mode energy+zcr vad */",
+    createWorkerSource: () => "/* voice-mode energy+zcr+crest vad */",
     loadModelBinaries: async () => [],
     idleUnloadMs: 0,
     workerFactory: () => {
@@ -6842,9 +7001,10 @@ function createEnergyVadWorkerClient(minSpeechRms = 0.012) {
             const pcm = new Float32Array(raw.pcm);
             const rms = computeChunkRms(pcm);
             const zcr = computeZeroCrossingRate(pcm);
-            const plausibleBand = zcr >= 5e-3 && zcr <= 0.45;
+            const crest = computeCrestFactor(pcm, rms);
+            const plausibleBand = zcr >= 8e-3 && zcr <= 0.42 && crest <= 10;
             const isSpeech = rms >= minSpeechRms && plausibleBand;
-            const speechProbability = isSpeech ? Math.min(0.99, 0.5 + rms * 2) : Math.min(0.4, rms * 10);
+            const speechProbability = isSpeech ? Math.min(0.99, 0.55 + rms * 2) : Math.min(0.4, rms * 8);
             respond({
               id: raw.id,
               type: "vad:result",
@@ -6874,9 +7034,11 @@ var VoiceModeIoController = class {
   systemRecognition = null;
   dictationState = "idle";
   bargeInCount = 0;
+  ownsVadWorker;
   constructor(options) {
     this.options = options;
-    this.vadWorkerClient = createEnergyVadWorkerClient();
+    this.ownsVadWorker = !options.sileroWorkerClient;
+    this.vadWorkerClient = options.sileroWorkerClient ?? createEnergyVadWorkerClient();
     const win = options.getWindow();
     const ua = win && typeof win.navigator?.userAgent === "string" ? win.navigator.userAgent : "";
     const isEdge = /\bEdg\//.test(ua);
@@ -6885,6 +7047,7 @@ var VoiceModeIoController = class {
     this.monitor = new AecBargeInMonitor({
       workerClient: this.vadWorkerClient,
       captureAudio: options.bargeInCaptureAudio,
+      confirmChunks: options.sileroWorkerClient ? 2 : ENERGY_VAD_CONFIRM_CHUNKS,
       isEdge,
       isSafari,
       isMobile,
@@ -7017,7 +7180,9 @@ var VoiceModeIoController = class {
   async dispose() {
     await this.stopDictation();
     await this.monitor.stop();
-    await this.vadWorkerClient.dispose();
+    if (this.ownsVadWorker) {
+      await this.vadWorkerClient.dispose();
+    }
   }
   setDictationState(state) {
     this.dictationState = state;
@@ -7122,6 +7287,7 @@ function createVoiceModeRuntime(host) {
   };
   let statusBadgeEl = null;
   let insecureBannerEl = null;
+  let refreshCharVoiceUi = null;
   const refreshStatusText = (msg) => {
     if (statusBadgeEl) statusBadgeEl.textContent = msg;
   };
@@ -7201,7 +7367,7 @@ function createVoiceModeRuntime(host) {
   const syncEmotionPrompt = () => {
     const s = getSettings();
     const active = s.enabled && s.emotionPromptEnabled;
-    const promptValue = active ? buildEmotionPromptInstruction() : "";
+    const promptValue = active ? buildEmotionPromptInstruction({ allowRoleplayNarration: true }) : "";
     host.setExtensionPrompt(
       EMOTION_PROMPT_KEY,
       promptValue,
@@ -7290,6 +7456,12 @@ function createVoiceModeRuntime(host) {
       settings.autoSendOnDictation,
       (v) => updateSettings((d) => void (d.autoSendOnDictation = v))
     );
+    addCheckbox(
+      "vm_st_use_server_proxy",
+      "Route Cloud TTS via Optional Server Plugin Proxy (/api/plugins/voice-mode)",
+      settings.useServerPluginProxy,
+      (v) => updateSettings((d) => void (d.useServerPluginProxy = v))
+    );
     const datalist = makeEl(doc, "datalist");
     datalist.id = "vm_st_kokoro_voices";
     for (const preset of KOKORO_DEFAULT_SPEAKERS) {
@@ -7299,27 +7471,42 @@ function createVoiceModeRuntime(host) {
       datalist.appendChild(opt);
     }
     content.appendChild(datalist);
+    const makeSelect = (id, items, initial, onChange) => {
+      const sel = makeEl(doc, "select", "text_pole");
+      sel.id = id;
+      for (const [val, label] of items) {
+        const opt = makeEl(doc, "option", void 0, label);
+        opt.value = val;
+        opt.selected = val === initial;
+        sel.appendChild(opt);
+      }
+      if (onChange) sel.addEventListener("change", () => onChange(sel.value));
+      return sel;
+    };
+    const makeInput = (id, type, placeholder, initial = "") => {
+      const inp = makeEl(doc, "input", "text_pole");
+      inp.type = type;
+      inp.id = id;
+      inp.placeholder = placeholder;
+      inp.value = initial;
+      return inp;
+    };
+    const ENGINE_OPTIONS = [
+      ["system", "Browser System TTS (Zero Config)"],
+      ["kokoro-daemon", "Local Kokoro Daemon (103 Voices)"],
+      ["openai-compat", "OpenAI-Compatible BYOK TTS"],
+      ["mimo", "Xiaomi MiMo TTS"]
+    ];
     const buildVoiceRow = (prefix, heading, currentEngine, currentVoice, onUpdate) => {
       const wrap = makeEl(doc, "div", "vm-st-field-group");
       wrap.appendChild(makeEl(doc, "label", void 0, heading));
-      const select = makeEl(doc, "select", "text_pole");
-      select.id = `${prefix}_engine`;
-      for (const [val, text] of [
-        ["system", "Browser System TTS (Zero Config)"],
-        ["kokoro-daemon", "Local Kokoro Daemon (103 Voices)"],
-        ["openai-compat", "OpenAI-Compatible BYOK TTS"],
-        ["mimo", "Xiaomi MiMo TTS"]
-      ]) {
-        const opt = makeEl(doc, "option", void 0, text);
-        opt.value = val;
-        opt.selected = val === currentEngine;
-        select.appendChild(opt);
-      }
-      const voiceInput = makeEl(doc, "input", "text_pole");
-      voiceInput.type = "text";
-      voiceInput.id = `${prefix}_voice`;
-      voiceInput.placeholder = "Voice ID (e.g. zf_001, alloy, default)";
-      voiceInput.value = currentVoice;
+      const select = makeSelect(`${prefix}_engine`, ENGINE_OPTIONS, currentEngine);
+      const voiceInput = makeInput(
+        `${prefix}_voice`,
+        "text",
+        "Voice ID (zf_001, alloy, default)",
+        currentVoice
+      );
       voiceInput.setAttribute("list", "vm_st_kokoro_voices");
       const commit = () => onUpdate(select.value, voiceInput.value.trim());
       select.addEventListener("change", commit);
@@ -7345,82 +7532,125 @@ function createVoiceModeRuntime(host) {
         d.narratorVoice = { engine, voice };
       })
     );
+    const charWrap = makeEl(doc, "div", "vm-st-field-group");
+    charWrap.id = "vm_st_char_voice_section";
+    const charLabel = makeEl(doc, "label", void 0, "Active Character Voice Override");
+    charLabel.id = "vm_st_active_char_label";
+    const charEngineSelect = makeSelect(
+      "vm_st_char_engine",
+      [["", "Inherit Default Character Voice"], ...ENGINE_OPTIONS],
+      ""
+    );
+    const charVoiceInput = makeInput(
+      "vm_st_char_voice",
+      "text",
+      "Character Voice ID override"
+    );
+    charVoiceInput.setAttribute("list", "vm_st_kokoro_voices");
+    const charResetBtn = makeEl(
+      doc,
+      "button",
+      "menu_button",
+      "Reset Character Voice"
+    );
+    charResetBtn.type = "button";
+    charResetBtn.id = "vm_st_char_reset_btn";
+    const activeVoiceKey = () => {
+      const a = resolveActiveSpeaker();
+      return { key: a.avatar || a.speaker || "", label: a.speaker || a.avatar || "(None)" };
+    };
+    refreshCharVoiceUi = () => {
+      const { key, label } = activeVoiceKey();
+      const entry = key ? getSettings().voiceMap[key] : void 0;
+      charLabel.textContent = `Active Character Voice: ${label}`;
+      charEngineSelect.value = entry ? entry.engine : "";
+      charVoiceInput.value = entry ? entry.voice : "";
+      charEngineSelect.disabled = charVoiceInput.disabled = charResetBtn.disabled = !key;
+    };
+    const commitCharOverride = () => {
+      const { key } = activeVoiceKey();
+      if (!key) return;
+      const eng = charEngineSelect.value;
+      const v = charVoiceInput.value.trim();
+      updateSettings((d) => {
+        if (!eng && !v) delete d.voiceMap[key];
+        else d.voiceMap[key] = { engine: eng || d.defaultVoice.engine, voice: v };
+      });
+      refreshCharVoiceUi?.();
+    };
+    charEngineSelect.addEventListener("change", commitCharOverride);
+    charVoiceInput.addEventListener("change", commitCharOverride);
+    charResetBtn.addEventListener("click", () => {
+      const { key } = activeVoiceKey();
+      if (key) updateSettings((d) => void delete d.voiceMap[key]);
+      refreshCharVoiceUi?.();
+    });
+    charWrap.append(charLabel, charEngineSelect, charVoiceInput, charResetBtn);
+    content.appendChild(charWrap);
+    refreshCharVoiceUi();
+    const endpointsWrap = makeEl(doc, "div", "vm-st-field-group");
+    endpointsWrap.appendChild(makeEl(doc, "label", void 0, "Endpoint Base URLs"));
+    for (const [id, ph, key] of [
+      ["vm_st_openai_tts_base_url", "OpenAI TTS URL", "openaiTtsBaseUrl"],
+      ["vm_st_asr_base_url", "OpenAI ASR URL", "asrBaseUrl"],
+      ["vm_st_daemon_base_url", "Local Daemon URL", "daemonBaseUrl"]
+    ]) {
+      const inp = makeInput(id, "url", ph, settings[key]);
+      inp.addEventListener("change", () => {
+        updateSettings((d) => {
+          d[key] = inp.value.trim();
+        });
+        inp.value = getSettings()[key];
+      });
+      endpointsWrap.appendChild(inp);
+    }
+    content.appendChild(endpointsWrap);
     const bargeWrap = makeEl(doc, "div", "vm-st-field-group");
     bargeWrap.appendChild(makeEl(doc, "label", void 0, "Voice Barge-In & ASR Engine"));
-    const bargeSelect = makeEl(doc, "select", "text_pole");
-    bargeSelect.id = "vm_st_barge_mode";
-    for (const [val, label] of [
-      ["detect", "AEC3 Auto-Detect (Safe Default)"],
-      ["auto", "Force Hands-Free Barge-In"],
-      ["manual", "Manual Button / Hotkey Only"]
-    ]) {
-      const opt = makeEl(doc, "option", void 0, label);
-      opt.value = val;
-      opt.selected = val === settings.bargeInMode;
-      bargeSelect.appendChild(opt);
-    }
-    bargeSelect.addEventListener(
-      "change",
-      () => updateSettings((d) => {
-        d.bargeInMode = bargeSelect.value;
-      })
+    const bargeSelect = makeSelect(
+      "vm_st_barge_mode",
+      [
+        ["detect", "AEC3 Auto-Detect (Safe Default)"],
+        ["auto", "Force Hands-Free Barge-In"],
+        ["manual", "Manual Button / Hotkey Only"]
+      ],
+      settings.bargeInMode,
+      (v) => updateSettings((d) => void (d.bargeInMode = v))
     );
-    const asrSelect = makeEl(doc, "select", "text_pole");
-    asrSelect.id = "vm_st_asr_engine";
-    for (const [val, label] of [
-      ["system", "Browser SpeechRecognition ASR"],
-      ["daemon", "Local Voice Daemon ASR (Zipformer2/SenseVoice)"],
-      ["openai-compat", "OpenAI-Compatible Whisper BYOK ASR"]
-    ]) {
-      const opt = makeEl(doc, "option", void 0, label);
-      opt.value = val;
-      opt.selected = val === settings.asrEngine;
-      asrSelect.appendChild(opt);
-    }
-    asrSelect.addEventListener(
-      "change",
-      () => updateSettings((d) => {
-        d.asrEngine = asrSelect.value;
-      })
+    const asrSelect = makeSelect(
+      "vm_st_asr_engine",
+      [
+        ["system", "Browser SpeechRecognition ASR"],
+        ["daemon", "Local Voice Daemon ASR"],
+        ["openai-compat", "OpenAI-Compatible Whisper ASR"]
+      ],
+      settings.asrEngine,
+      (v) => updateSettings((d) => void (d.asrEngine = v))
     );
     bargeWrap.append(bargeSelect, asrSelect);
     content.appendChild(bargeWrap);
     const secretWrap = makeEl(doc, "div", "vm-st-field-group");
-    secretWrap.appendChild(
-      makeEl(doc, "label", void 0, "Store API Key in SillyTavern Server Secrets")
+    secretWrap.appendChild(makeEl(doc, "label", void 0, "Server Secrets (/api/secrets/write)"));
+    const slotSelect = makeSelect(
+      "vm_st_secret_slot",
+      [
+        ["openaiTts", "OpenAI-Compatible TTS Key"],
+        ["mimo", "MiMo TTS Key"],
+        ["asr", "OpenAI-Compatible ASR Key"],
+        ["daemon", "Local Voice Daemon Token"]
+      ],
+      "openaiTts"
     );
-    const slotSelect = makeEl(doc, "select", "text_pole");
-    slotSelect.id = "vm_st_secret_slot";
-    for (const [slot, label] of [
-      ["openaiTts", "OpenAI-Compatible TTS Key"],
-      ["mimo", "MiMo TTS Key"],
-      ["asr", "OpenAI-Compatible ASR Key"],
-      ["daemon", "Local Voice Daemon Bearer Token"]
-    ]) {
-      const opt = makeEl(doc, "option", void 0, label);
-      opt.value = slot;
-      slotSelect.appendChild(opt);
-    }
-    const secretInput = makeEl(doc, "input", "text_pole");
-    secretInput.type = "password";
-    secretInput.id = "vm_st_secret_input";
+    const secretInput = makeInput("vm_st_secret_input", "password", "Paste secret key");
     secretInput.autocomplete = "off";
-    secretInput.placeholder = "Paste secret key (saved via /api/secrets/write)";
-    const saveKeyBtn = makeEl(
-      doc,
-      "button",
-      "menu_button",
-      "Save Server Secret"
-    );
+    const saveKeyBtn = makeEl(doc, "button", "menu_button", "Save Server Secret");
     saveKeyBtn.type = "button";
     saveKeyBtn.id = "vm_st_save_secret_btn";
     saveKeyBtn.addEventListener("click", () => {
       const slot = slotSelect.value;
       const val = secretInput.value;
       secretInput.value = "";
-      void secretBroker.setSecret(slot, val).then(() => {
-        refreshStatusText(`Saved ${slot} secret`);
-      });
+      void secretBroker.setSecret(slot, val).then(() => refreshStatusText(`Saved ${slot} secret`));
     });
     secretWrap.append(slotSelect, secretInput, saveKeyBtn);
     content.appendChild(secretWrap);
@@ -7525,8 +7755,10 @@ function createVoiceModeRuntime(host) {
         router.onChatChanged();
         ttsHub.cancel();
         void io.disarmBargeIn();
+        refreshCharVoiceUi?.();
       };
       subscribe(et.CHAT_CHANGED, resetAll);
+      subscribe(et.GROUP_UPDATED, () => refreshCharVoiceUi?.());
       subscribe(et.MESSAGE_SWIPED, resetAll);
       subscribe(et.MESSAGE_DELETED, resetAll);
       const doc = getDoc();
@@ -7614,9 +7846,6 @@ async function activate() {
         }
       }
     });
-    if (typeof window !== "undefined") {
-      window.__sillyTavernVoiceMode = activeRuntime;
-    }
   }
   await activeRuntime.activate();
 }

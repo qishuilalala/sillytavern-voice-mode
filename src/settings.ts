@@ -94,12 +94,13 @@ const VALID_TTS_ENGINES = new Set<StTtsEngineKind>([
 ]);
 const VALID_ASR_ENGINES = new Set<StAsrEngineKind>(["system", "openai-compat", "daemon"]);
 const VALID_BARGE_IN_MODES = new Set<BargeInMode>(["detect", "auto", "manual"]);
-const SECRET_LIKE_VALUE_RE = /^(?:sk-[A-Za-z0-9_-]{12,}|Bearer\s+\S+)/i;
 
 function sanitizeCleanString(val: unknown, fallback = ""): string {
   if (typeof val !== "string") return fallback;
   const trimmed = val.trim();
-  if (SECRET_LIKE_VALUE_RE.test(trimmed)) return fallback;
+  if (trimmed.length > 0 && redactSecrets(trimmed) !== trimmed) {
+    return fallback;
+  }
   return trimmed;
 }
 
@@ -315,7 +316,7 @@ export function inspectSecureOrigin(win?: WindowOriginLike | null): SecureOrigin
   const host = win?.location?.host ?? "unknown-host";
   const protocol = win?.location?.protocol ?? "http:";
   const originLabel = `${protocol}//${host}`;
-  if (win?.isSecureContext !== false) {
+  if (Boolean(win && win.isSecureContext === true)) {
     return {
       secure: true,
       originLabel,

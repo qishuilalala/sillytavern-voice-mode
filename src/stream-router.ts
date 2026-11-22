@@ -49,6 +49,22 @@ function cleanOuterQuotes(text: string): string {
   return text.replace(/^["“”「」『』\s]+|["“”「」『』\s]+$/g, "").trim();
 }
 
+function splitTerminalWhisperBoundaries(raw: string): string[] {
+  const out: string[] = [];
+  const re = /([.!?。！？]["'”’)]?\s*<\s*\/whisper\s*>)\s+/gi;
+  let last = 0;
+  for (const m of raw.matchAll(re)) {
+    const idx = m.index ?? 0;
+    const endOfClose = idx + (m[1]?.length ?? 0);
+    const head = raw.slice(last, endOfClose).trim();
+    if (head) out.push(head);
+    last = idx + m[0].length;
+  }
+  const tail = raw.slice(last).trim();
+  if (tail) out.push(tail);
+  return out;
+}
+
 export class StreamingUtteranceRouter {
   private narrationSplitEnabled: boolean;
   private readonly segmenterOptions?: SegmenterOptions;
@@ -65,6 +81,7 @@ export class StreamingUtteranceRouter {
   private activeAvatar: string | undefined = undefined;
   private inNarration = false;
   private pendingStar = false;
+  private inOpenWhisper = false;
 
   constructor(options: StreamingUtteranceRouterOptions = {}) {
     this.narrationSplitEnabled = options.narrationSplitEnabled ?? true;
@@ -190,7 +207,39 @@ export class StreamingUtteranceRouter {
     this.activeAvatar = undefined;
     this.inNarration = false;
     this.pendingStar = false;
+    this.inOpenWhisper = false;
     this.segmenter.flush();
+  }
+
+  private balanceSentenceWhisper(raw: string): string {
+    const seeded = this.inOpenWhisper ? `<whisper>${raw}` : raw;
+    let depth = 0;
+    let rebuilt = "";
+    let lastIdx = 0;
+    const tagRe = /<\s*(\/?)\s*whisper\s*>/gi;
+    for (const match of seeded.matchAll(tagRe)) {
+      const idx = match.index ?? 0;
+      rebuilt += seeded.slice(lastIdx, idx);
+      lastIdx = idx + match[0].length;
+      const isClosing = match[1] === "/";
+      if (!isClosing) {
+        if (depth === 0) rebuilt += "<whisper>";
+        depth++;
+      } else if (depth > 0) {
+        depth--;
+        if (depth === 0) rebuilt += "</whisper>";
+      }
+    }
+    rebuilt += seeded.slice(lastIdx);
+    if (depth > 0) {
+      rebuilt += "</whisper>";
+      this.inOpenWhisper = true;
+    } else {
+      this.inOpenWhisper = false;
+    }
+    const collapsed = rebuilt.replace(/<\s*whisper\s*>\s*<\s*\/whisper\s*>/gi, "").trim();
+    const textWithoutWhisper = collapsed.replace(/<\s*\/?\s*whisper\s*>/gi, "").trim();
+    return textWithoutWhisper ? collapsed : "";
   }
 
   private currentRole(): UtteranceRole {
@@ -204,17 +253,20 @@ export class StreamingUtteranceRouter {
     avatar: string | undefined,
     out: RoutedUtterance[],
   ): void {
-    for (const raw of sentences) {
-      const cleaned = role === "character" ? cleanOuterQuotes(raw) : raw.trim();
-      if (!cleaned) continue;
-      const utterance: RoutedUtterance = {
-        role,
-        speaker,
-        ...(avatar ? { avatar } : {}),
-        text: cleaned,
-      };
-      out.push(utterance);
-      this.onUtterance?.(utterance);
+    for (const rawSentence of sentences) {
+      for (const raw of splitTerminalWhisperBoundaries(rawSentence)) {
+        const preCleaned = role === "character" ? cleanOuterQuotes(raw) : raw.trim();
+        const cleaned = this.balanceSentenceWhisper(preCleaned);
+        if (!cleaned) continue;
+        const utterance: RoutedUtterance = {
+          role,
+          speaker,
+          ...(avatar ? { avatar } : {}),
+          text: cleaned,
+        };
+        out.push(utterance);
+        this.onUtterance?.(utterance);
+      }
     }
   }
 
@@ -270,6 +322,7 @@ export class StreamingUtteranceRouter {
           buf = "";
         }
         this.emitSentences(this.segmenter.flush(), roleBefore, speaker, avatar, out);
+        this.inOpenWhisper = false;
         this.inNarration = !this.inNarration;
         i++;
         continue;
@@ -301,6 +354,7 @@ export class StreamingUtteranceRouter {
     }
     this.emitSentences(this.segmenter.flush(), role, speaker, avatar, out);
     this.inNarration = false;
+    this.inOpenWhisper = false;
     return out;
   }
 }

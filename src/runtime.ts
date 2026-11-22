@@ -192,6 +192,7 @@ export function createVoiceModeRuntime(host: SillyTavernHostBridge): VoiceModeRu
 
   let statusBadgeEl: HTMLElement | null = null;
   let insecureBannerEl: HTMLElement | null = null;
+  let refreshCharVoiceUi: (() => void) | null = null;
   const refreshStatusText = (msg: string) => {
     if (statusBadgeEl) statusBadgeEl.textContent = msg;
   };
@@ -275,7 +276,9 @@ export function createVoiceModeRuntime(host: SillyTavernHostBridge): VoiceModeRu
   const syncEmotionPrompt = (): void => {
     const s = getSettings();
     const active = s.enabled && s.emotionPromptEnabled;
-    const promptValue = active ? buildEmotionPromptInstruction() : "";
+    const promptValue = active
+      ? buildEmotionPromptInstruction({ allowRoleplayNarration: true })
+      : "";
     host.setExtensionPrompt(
       EMOTION_PROMPT_KEY,
       promptValue,
@@ -388,6 +391,12 @@ export function createVoiceModeRuntime(host: SillyTavernHostBridge): VoiceModeRu
       settings.autoSendOnDictation,
       (v) => updateSettings((d) => void (d.autoSendOnDictation = v)),
     );
+    addCheckbox(
+      "vm_st_use_server_proxy",
+      "Route Cloud TTS via Optional Server Plugin Proxy (/api/plugins/voice-mode)",
+      settings.useServerPluginProxy,
+      (v) => updateSettings((d) => void (d.useServerPluginProxy = v)),
+    );
 
     const datalist = makeEl(doc, "datalist");
     datalist.id = "vm_st_kokoro_voices";
@@ -399,6 +408,45 @@ export function createVoiceModeRuntime(host: SillyTavernHostBridge): VoiceModeRu
     }
     content.appendChild(datalist);
 
+    const makeSelect = (
+      id: string,
+      items: ReadonlyArray<readonly [string, string]>,
+      initial: string,
+      onChange?: (val: string) => void,
+    ): HTMLSelectElement => {
+      const sel = makeEl(doc, "select", "text_pole");
+      sel.id = id;
+      for (const [val, label] of items) {
+        const opt = makeEl(doc, "option", undefined, label);
+        opt.value = val;
+        opt.selected = val === initial;
+        sel.appendChild(opt);
+      }
+      if (onChange) sel.addEventListener("change", () => onChange(sel.value));
+      return sel;
+    };
+
+    const makeInput = (
+      id: string,
+      type: string,
+      placeholder: string,
+      initial = "",
+    ): HTMLInputElement => {
+      const inp = makeEl(doc, "input", "text_pole");
+      inp.type = type;
+      inp.id = id;
+      inp.placeholder = placeholder;
+      inp.value = initial;
+      return inp;
+    };
+
+    const ENGINE_OPTIONS = [
+      ["system", "Browser System TTS (Zero Config)"],
+      ["kokoro-daemon", "Local Kokoro Daemon (103 Voices)"],
+      ["openai-compat", "OpenAI-Compatible BYOK TTS"],
+      ["mimo", "Xiaomi MiMo TTS"],
+    ] as const;
+
     const buildVoiceRow = (
       prefix: string,
       heading: string,
@@ -408,26 +456,14 @@ export function createVoiceModeRuntime(host: SillyTavernHostBridge): VoiceModeRu
     ) => {
       const wrap = makeEl(doc, "div", "vm-st-field-group");
       wrap.appendChild(makeEl(doc, "label", undefined, heading));
-      const select = makeEl(doc, "select", "text_pole") as HTMLSelectElement;
-      select.id = `${prefix}_engine`;
-      for (const [val, text] of [
-        ["system", "Browser System TTS (Zero Config)"],
-        ["kokoro-daemon", "Local Kokoro Daemon (103 Voices)"],
-        ["openai-compat", "OpenAI-Compatible BYOK TTS"],
-        ["mimo", "Xiaomi MiMo TTS"],
-      ] as const) {
-        const opt = makeEl(doc, "option", undefined, text);
-        opt.value = val;
-        opt.selected = val === currentEngine;
-        select.appendChild(opt);
-      }
-      const voiceInput = makeEl(doc, "input", "text_pole") as HTMLInputElement;
-      voiceInput.type = "text";
-      voiceInput.id = `${prefix}_voice`;
-      voiceInput.placeholder = "Voice ID (e.g. zf_001, alloy, default)";
-      voiceInput.value = currentVoice;
+      const select = makeSelect(`${prefix}_engine`, ENGINE_OPTIONS, currentEngine);
+      const voiceInput = makeInput(
+        `${prefix}_voice`,
+        "text",
+        "Voice ID (zf_001, alloy, default)",
+        currentVoice,
+      );
       voiceInput.setAttribute("list", "vm_st_kokoro_voices");
-
       const commit = () =>
         onUpdate(select.value as StTtsEngineKind, voiceInput.value.trim());
       select.addEventListener("change", commit);
@@ -457,84 +493,129 @@ export function createVoiceModeRuntime(host: SillyTavernHostBridge): VoiceModeRu
         }),
     );
 
-    // Barge-In & ASR Mode selectors
+    const charWrap = makeEl(doc, "div", "vm-st-field-group");
+    charWrap.id = "vm_st_char_voice_section";
+    const charLabel = makeEl(doc, "label", undefined, "Active Character Voice Override");
+    charLabel.id = "vm_st_active_char_label";
+    const charEngineSelect = makeSelect(
+      "vm_st_char_engine",
+      [["", "Inherit Default Character Voice"], ...ENGINE_OPTIONS],
+      "",
+    );
+    const charVoiceInput = makeInput(
+      "vm_st_char_voice",
+      "text",
+      "Character Voice ID override",
+    );
+    charVoiceInput.setAttribute("list", "vm_st_kokoro_voices");
+    const charResetBtn = makeEl(
+      doc,
+      "button",
+      "menu_button",
+      "Reset Character Voice",
+    );
+    charResetBtn.type = "button";
+    charResetBtn.id = "vm_st_char_reset_btn";
+
+    const activeVoiceKey = () => {
+      const a = resolveActiveSpeaker();
+      return { key: a.avatar || a.speaker || "", label: a.speaker || a.avatar || "(None)" };
+    };
+    refreshCharVoiceUi = () => {
+      const { key, label } = activeVoiceKey();
+      const entry = key ? getSettings().voiceMap[key] : undefined;
+      charLabel.textContent = `Active Character Voice: ${label}`;
+      charEngineSelect.value = entry ? entry.engine : "";
+      charVoiceInput.value = entry ? entry.voice : "";
+      charEngineSelect.disabled = charVoiceInput.disabled = charResetBtn.disabled = !key;
+    };
+    const commitCharOverride = () => {
+      const { key } = activeVoiceKey();
+      if (!key) return;
+      const eng = charEngineSelect.value as StTtsEngineKind | "";
+      const v = charVoiceInput.value.trim();
+      updateSettings((d) => {
+        if (!eng && !v) delete d.voiceMap[key];
+        else d.voiceMap[key] = { engine: (eng || d.defaultVoice.engine) as StTtsEngineKind, voice: v };
+      });
+      refreshCharVoiceUi?.();
+    };
+    charEngineSelect.addEventListener("change", commitCharOverride);
+    charVoiceInput.addEventListener("change", commitCharOverride);
+    charResetBtn.addEventListener("click", () => {
+      const { key } = activeVoiceKey();
+      if (key) updateSettings((d) => void delete d.voiceMap[key]);
+      refreshCharVoiceUi?.();
+    });
+    charWrap.append(charLabel, charEngineSelect, charVoiceInput, charResetBtn);
+    content.appendChild(charWrap);
+    refreshCharVoiceUi();
+
+    const endpointsWrap = makeEl(doc, "div", "vm-st-field-group");
+    endpointsWrap.appendChild(makeEl(doc, "label", undefined, "Endpoint Base URLs"));
+    for (const [id, ph, key] of [
+      ["vm_st_openai_tts_base_url", "OpenAI TTS URL", "openaiTtsBaseUrl"],
+      ["vm_st_asr_base_url", "OpenAI ASR URL", "asrBaseUrl"],
+      ["vm_st_daemon_base_url", "Local Daemon URL", "daemonBaseUrl"],
+    ] as const) {
+      const inp = makeInput(id, "url", ph, settings[key]);
+      inp.addEventListener("change", () => {
+        updateSettings((d) => {
+          d[key] = inp.value.trim();
+        });
+        inp.value = getSettings()[key];
+      });
+      endpointsWrap.appendChild(inp);
+    }
+    content.appendChild(endpointsWrap);
+
     const bargeWrap = makeEl(doc, "div", "vm-st-field-group");
     bargeWrap.appendChild(makeEl(doc, "label", undefined, "Voice Barge-In & ASR Engine"));
-    const bargeSelect = makeEl(doc, "select", "text_pole") as HTMLSelectElement;
-    bargeSelect.id = "vm_st_barge_mode";
-    for (const [val, label] of [
-      ["detect", "AEC3 Auto-Detect (Safe Default)"],
-      ["auto", "Force Hands-Free Barge-In"],
-      ["manual", "Manual Button / Hotkey Only"],
-    ] as const) {
-      const opt = makeEl(doc, "option", undefined, label);
-      opt.value = val;
-      opt.selected = val === settings.bargeInMode;
-      bargeSelect.appendChild(opt);
-    }
-    bargeSelect.addEventListener("change", () =>
-      updateSettings((d) => {
-        d.bargeInMode = bargeSelect.value as BargeInMode;
-      }),
+    const bargeSelect = makeSelect(
+      "vm_st_barge_mode",
+      [
+        ["detect", "AEC3 Auto-Detect (Safe Default)"],
+        ["auto", "Force Hands-Free Barge-In"],
+        ["manual", "Manual Button / Hotkey Only"],
+      ],
+      settings.bargeInMode,
+      (v) => updateSettings((d) => void (d.bargeInMode = v as BargeInMode)),
     );
-
-    const asrSelect = makeEl(doc, "select", "text_pole") as HTMLSelectElement;
-    asrSelect.id = "vm_st_asr_engine";
-    for (const [val, label] of [
-      ["system", "Browser SpeechRecognition ASR"],
-      ["daemon", "Local Voice Daemon ASR (Zipformer2/SenseVoice)"],
-      ["openai-compat", "OpenAI-Compatible Whisper BYOK ASR"],
-    ] as const) {
-      const opt = makeEl(doc, "option", undefined, label);
-      opt.value = val;
-      opt.selected = val === settings.asrEngine;
-      asrSelect.appendChild(opt);
-    }
-    asrSelect.addEventListener("change", () =>
-      updateSettings((d) => {
-        d.asrEngine = asrSelect.value as StAsrEngineKind;
-      }),
+    const asrSelect = makeSelect(
+      "vm_st_asr_engine",
+      [
+        ["system", "Browser SpeechRecognition ASR"],
+        ["daemon", "Local Voice Daemon ASR"],
+        ["openai-compat", "OpenAI-Compatible Whisper ASR"],
+      ],
+      settings.asrEngine,
+      (v) => updateSettings((d) => void (d.asrEngine = v as StAsrEngineKind)),
     );
     bargeWrap.append(bargeSelect, asrSelect);
     content.appendChild(bargeWrap);
 
-    // Server-side Secret Saver (never stored in extension_settings)
     const secretWrap = makeEl(doc, "div", "vm-st-field-group");
-    secretWrap.appendChild(
-      makeEl(doc, "label", undefined, "Store API Key in SillyTavern Server Secrets"),
+    secretWrap.appendChild(makeEl(doc, "label", undefined, "Server Secrets (/api/secrets/write)"));
+    const slotSelect = makeSelect(
+      "vm_st_secret_slot",
+      [
+        ["openaiTts", "OpenAI-Compatible TTS Key"],
+        ["mimo", "MiMo TTS Key"],
+        ["asr", "OpenAI-Compatible ASR Key"],
+        ["daemon", "Local Voice Daemon Token"],
+      ],
+      "openaiTts",
     );
-    const slotSelect = makeEl(doc, "select", "text_pole") as HTMLSelectElement;
-    slotSelect.id = "vm_st_secret_slot";
-    for (const [slot, label] of [
-      ["openaiTts", "OpenAI-Compatible TTS Key"],
-      ["mimo", "MiMo TTS Key"],
-      ["asr", "OpenAI-Compatible ASR Key"],
-      ["daemon", "Local Voice Daemon Bearer Token"],
-    ] as const) {
-      const opt = makeEl(doc, "option", undefined, label);
-      opt.value = slot;
-      slotSelect.appendChild(opt);
-    }
-    const secretInput = makeEl(doc, "input", "text_pole") as HTMLInputElement;
-    secretInput.type = "password";
-    secretInput.id = "vm_st_secret_input";
+    const secretInput = makeInput("vm_st_secret_input", "password", "Paste secret key");
     secretInput.autocomplete = "off";
-    secretInput.placeholder = "Paste secret key (saved via /api/secrets/write)";
-    const saveKeyBtn = makeEl(
-      doc,
-      "button",
-      "menu_button",
-      "Save Server Secret",
-    ) as HTMLButtonElement;
+    const saveKeyBtn = makeEl(doc, "button", "menu_button", "Save Server Secret");
     saveKeyBtn.type = "button";
     saveKeyBtn.id = "vm_st_save_secret_btn";
     saveKeyBtn.addEventListener("click", () => {
       const slot = slotSelect.value as SecretSlot;
       const val = secretInput.value;
       secretInput.value = "";
-      void secretBroker.setSecret(slot, val).then(() => {
-        refreshStatusText(`Saved ${slot} secret`);
-      });
+      void secretBroker.setSecret(slot, val).then(() => refreshStatusText(`Saved ${slot} secret`));
     });
     secretWrap.append(slotSelect, secretInput, saveKeyBtn);
     content.appendChild(secretWrap);
@@ -647,8 +728,10 @@ export function createVoiceModeRuntime(host: SillyTavernHostBridge): VoiceModeRu
         router.onChatChanged();
         ttsHub.cancel();
         void io.disarmBargeIn();
+        refreshCharVoiceUi?.();
       };
       subscribe(et.CHAT_CHANGED, resetAll);
+      subscribe(et.GROUP_UPDATED, () => refreshCharVoiceUi?.());
       subscribe(et.MESSAGE_SWIPED, resetAll);
       subscribe(et.MESSAGE_DELETED, resetAll);
 

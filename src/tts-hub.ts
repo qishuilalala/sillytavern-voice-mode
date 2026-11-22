@@ -4,6 +4,7 @@ import {
   MimoTtsEngine,
   OpenAiCompatTtsEngine,
   compileEmotionPlan,
+  type EmotionSegment,
   type TtsEngine,
   type TtsSynthOptions,
   type TtsSynthResult,
@@ -24,12 +25,18 @@ import type { RoutedUtterance, UtteranceRole } from "./stream-router.ts";
 
 export const SYSTEM_TTS_MIME = "application/x-voice-mode-system-tts";
 
+export interface SystemTtsSegment {
+  text: string;
+  whisper: boolean;
+  preBreakMs: number;
+  breakAfterMs: number;
+}
+
 export interface SystemTtsPayload {
   text: string;
   voice: string;
   rate: number;
-  preBreakMs: number;
-  whisper: boolean;
+  segments: SystemTtsSegment[];
 }
 
 export interface UtterancePlaybackInfo {
@@ -67,6 +74,45 @@ function abortableDelay(ms: number, signal: AbortSignal): Promise<void> {
   });
 }
 
+function computeLeadingBreakMs(rawText: string): number {
+  let sum = 0;
+  let rest = rawText;
+  const leadRe = /^\s*<\s*break\s+(\d+)\s*ms\s*>/i;
+  while (true) {
+    const m = leadRe.exec(rest);
+    if (!m) break;
+    sum += Math.min(5000, Math.max(0, Number(m[1] ?? 0)));
+    rest = rest.slice(m[0].length);
+  }
+  return Math.min(10000, sum);
+}
+
+export function buildSystemTtsSegments(
+  rawText: string,
+  segments: readonly EmotionSegment[],
+): SystemTtsSegment[] {
+  if (segments.length === 0) return [];
+  const leadingBreak = computeLeadingBreakMs(rawText);
+  return segments.map((seg, idx) => {
+    const attached = Math.max(0, Math.min(5000, seg.preBreakMs ?? 0));
+    if (idx === 0 && leadingBreak > 0) {
+      const pre = Math.min(leadingBreak, attached);
+      return {
+        text: seg.text,
+        whisper: seg.whisper,
+        preBreakMs: pre,
+        breakAfterMs: Math.max(0, attached - pre),
+      };
+    }
+    return {
+      text: seg.text,
+      whisper: seg.whisper,
+      preBreakMs: 0,
+      breakAfterMs: attached,
+    };
+  });
+}
+
 export class SystemTtsEngine implements TtsEngine {
   readonly kind = "system" as const;
   readonly mime = SYSTEM_TTS_MIME;
@@ -82,14 +128,17 @@ export class SystemTtsEngine implements TtsEngine {
 
   async synthesize(
     text: string,
-    options?: TtsSynthOptions & { preBreakMs?: number; whisper?: boolean },
+    options?: TtsSynthOptions & { segments?: SystemTtsSegment[] },
   ): Promise<TtsSynthResult> {
+    const segments =
+      options?.segments && options.segments.length > 0
+        ? options.segments
+        : [{ text, whisper: false, preBreakMs: 0, breakAfterMs: 0 }];
     const payload: SystemTtsPayload = {
       text,
       voice: options?.voice ?? this.defaultVoice,
       rate: options?.rate ?? this.defaultRate,
-      preBreakMs: Math.max(0, Math.min(3000, options?.preBreakMs ?? 0)),
-      whisper: Boolean(options?.whisper),
+      segments,
     };
     return {
       audio: new TextEncoder().encode(JSON.stringify(payload)),
@@ -113,8 +162,9 @@ export class SystemTtsEngine implements TtsEngine {
 }
 
 export class BrowserAudioSink implements AudioSink {
-  private activeAudio: HTMLAudioElement | null = null;
+  private sharedAudio: HTMLAudioElement | null = null;
   private activeObjectUrl: string | null = null;
+  private audioPlaying = false;
 
   async play(payload: TtsSynthResult, signal: AbortSignal): Promise<void> {
     if (signal.aborted) return;
@@ -126,23 +176,23 @@ export class BrowserAudioSink implements AudioSink {
   }
 
   pause(): void {
-    if (this.activeAudio) {
-      this.activeAudio.pause();
+    if (this.audioPlaying && this.sharedAudio) {
+      this.sharedAudio.pause();
     } else if (typeof window !== "undefined" && "speechSynthesis" in window) {
       window.speechSynthesis.pause();
     }
   }
 
   resume(): void {
-    if (this.activeAudio) {
-      void this.activeAudio.play().catch(() => undefined);
+    if (this.audioPlaying && this.sharedAudio) {
+      void this.sharedAudio.play().catch(() => undefined);
     } else if (typeof window !== "undefined" && "speechSynthesis" in window) {
       window.speechSynthesis.resume();
     }
   }
 
   stop(): void {
-    this.cleanupAudioElement();
+    this.resetSharedAudio();
     if (typeof window !== "undefined" && "speechSynthesis" in window) {
       try {
         window.speechSynthesis.cancel();
@@ -152,16 +202,18 @@ export class BrowserAudioSink implements AudioSink {
     }
   }
 
-  private cleanupAudioElement(): void {
-    if (this.activeAudio) {
+  private resetSharedAudio(): void {
+    this.audioPlaying = false;
+    if (this.sharedAudio) {
       try {
-        this.activeAudio.pause();
-        this.activeAudio.removeAttribute("src");
-        this.activeAudio.load();
+        this.sharedAudio.onended = null;
+        this.sharedAudio.onerror = null;
+        this.sharedAudio.pause();
+        this.sharedAudio.removeAttribute("src");
+        this.sharedAudio.load();
       } catch {
-        // Ignore media element teardown errors.
+        // Ignore media element reset errors.
       }
-      this.activeAudio = null;
     }
     if (this.activeObjectUrl && typeof URL !== "undefined") {
       try {
@@ -173,18 +225,14 @@ export class BrowserAudioSink implements AudioSink {
     }
   }
 
-  private async playSystemUtterance(
-    encoded: Uint8Array,
+  private async speakSingleSystemSegment(
+    text: string,
+    voiceName: string,
+    rate: number,
+    whisper: boolean,
     signal: AbortSignal,
   ): Promise<void> {
-    const parsed = JSON.parse(
-      new TextDecoder().decode(encoded),
-    ) as SystemTtsPayload;
-    if (parsed.preBreakMs > 0) {
-      await abortableDelay(parsed.preBreakMs, signal);
-    }
-    if (signal.aborted || !parsed.text.trim()) return;
-
+    if (signal.aborted || !text.trim()) return;
     const synth =
       typeof window !== "undefined" && "speechSynthesis" in window
         ? window.speechSynthesis
@@ -195,10 +243,8 @@ export class BrowserAudioSink implements AudioSink {
         : null;
     const voices = synth ? synth.getVoices() : [];
 
-    // Headless Chromium (`--headless=new`) often exposes zero OS speechSynthesis voices;
-    // simulate bounded speaking time so queue events and barge-in remain deterministic.
     if (!synth || !UtteranceCtor || voices.length === 0) {
-      const durationMs = Math.min(900, Math.max(140, parsed.text.length * 16));
+      const durationMs = Math.min(900, Math.max(100, text.length * 16));
       await abortableDelay(durationMs, signal);
       return;
     }
@@ -221,22 +267,22 @@ export class BrowserAudioSink implements AudioSink {
         finish();
       };
 
-      const utterance = new UtteranceCtor(parsed.text);
-      if (parsed.voice) {
+      const utterance = new UtteranceCtor(text);
+      if (voiceName) {
         const matched = voices.find(
           (v) =>
-            v.name === parsed.voice ||
-            v.voiceURI === parsed.voice ||
-            v.lang === parsed.voice,
+            v.name === voiceName ||
+            v.voiceURI === voiceName ||
+            v.lang === voiceName,
         );
         if (matched) utterance.voice = matched;
       }
-      utterance.rate = parsed.rate || 1;
-      utterance.volume = parsed.whisper ? 0.65 : 1;
+      utterance.rate = rate || 1;
+      utterance.volume = whisper ? 0.65 : 1;
       utterance.onend = finish;
       utterance.onerror = finish;
 
-      const maxExpectedMs = Math.min(20000, Math.max(2500, parsed.text.length * 120));
+      const maxExpectedMs = Math.min(20000, Math.max(2500, text.length * 120));
       const safetyTimer = setTimeout(finish, maxExpectedMs);
       signal.addEventListener("abort", onAbort, { once: true });
       try {
@@ -248,6 +294,38 @@ export class BrowserAudioSink implements AudioSink {
     });
   }
 
+  private async playSystemUtterance(
+    encoded: Uint8Array,
+    signal: AbortSignal,
+  ): Promise<void> {
+    const parsed = JSON.parse(
+      new TextDecoder().decode(encoded),
+    ) as SystemTtsPayload;
+    const segs =
+      Array.isArray(parsed.segments) && parsed.segments.length > 0
+        ? parsed.segments
+        : [{ text: parsed.text, whisper: false, preBreakMs: 0, breakAfterMs: 0 }];
+
+    for (const seg of segs) {
+      if (signal.aborted) return;
+      if (seg.preBreakMs > 0) {
+        await abortableDelay(seg.preBreakMs, signal);
+      }
+      if (signal.aborted) return;
+      await this.speakSingleSystemSegment(
+        seg.text,
+        parsed.voice,
+        parsed.rate,
+        seg.whisper,
+        signal,
+      );
+      if (signal.aborted) return;
+      if (seg.breakAfterMs > 0) {
+        await abortableDelay(seg.breakAfterMs, signal);
+      }
+    }
+  }
+
   private async playAudioBytes(
     payload: TtsSynthResult,
     signal: AbortSignal,
@@ -256,14 +334,15 @@ export class BrowserAudioSink implements AudioSink {
       await abortableDelay(80, signal);
       return;
     }
-    this.cleanupAudioElement();
+    this.resetSharedAudio();
     const copy = new Uint8Array(payload.audio.byteLength);
     copy.set(payload.audio);
     const blob = new Blob([copy], { type: payload.mime || "audio/wav" });
     const objectUrl = URL.createObjectURL(blob);
-    const audio = new Audio(objectUrl);
+    const audio = (this.sharedAudio ??= new Audio());
+    audio.src = objectUrl;
     this.activeObjectUrl = objectUrl;
-    this.activeAudio = audio;
+    this.audioPlaying = true;
 
     await new Promise<void>((resolve) => {
       let settled = false;
@@ -271,7 +350,7 @@ export class BrowserAudioSink implements AudioSink {
         if (settled) return;
         settled = true;
         signal.removeEventListener("abort", onAbort);
-        this.cleanupAudioElement();
+        this.resetSharedAudio();
         resolve();
       };
       const onAbort = () => {
@@ -329,6 +408,8 @@ export function resolveUtteranceVoice(
   return settings.defaultVoice;
 }
 
+const SERVER_PLUGIN_HEALTH_TTL_MS = 15_000;
+
 export class VoiceModeTtsHub {
   private readonly options: VoiceModeTtsHubOptions;
   private readonly systemEngine = new SystemTtsEngine();
@@ -336,6 +417,7 @@ export class VoiceModeTtsHub {
   private readonly queue: PlaybackQueue;
   private daemonClient: DaemonClient | null = null;
   private daemonClientUrl = "";
+  private serverPluginState: { available: boolean; expiresAt: number } | null = null;
   private readonly pendingInfo = new Map<string, UtterancePlaybackInfo>();
   private seq = 0;
   private lastUsesSystemTts = true;
@@ -436,6 +518,39 @@ export class VoiceModeTtsHub {
     return (input, init) => globalThis.fetch(input, init);
   }
 
+  private async isServerPluginHealthy(baseFetch: typeof fetch): Promise<boolean> {
+    const now = Date.now();
+    if (this.serverPluginState && now < this.serverPluginState.expiresAt) {
+      return this.serverPluginState.available;
+    }
+    try {
+      const res = await baseFetch("/api/plugins/voice-mode/health", {
+        method: "GET",
+        signal: AbortSignal.timeout(800),
+      });
+      if (!res.ok) {
+        this.serverPluginState = {
+          available: false,
+          expiresAt: now + SERVER_PLUGIN_HEALTH_TTL_MS,
+        };
+        return false;
+      }
+      const data = (await res.json()) as { ok?: boolean; id?: string };
+      const available = data?.ok === true && data?.id === "voice-mode";
+      this.serverPluginState = {
+        available,
+        expiresAt: now + SERVER_PLUGIN_HEALTH_TTL_MS,
+      };
+      return available;
+    } catch {
+      this.serverPluginState = {
+        available: false,
+        expiresAt: now + SERVER_PLUGIN_HEALTH_TTL_MS,
+      };
+      return false;
+    }
+  }
+
   private getOrCreateDaemonClient(settings: VoiceModeExtensionSettings): DaemonClient {
     if (this.daemonClient && this.daemonClientUrl === settings.daemonBaseUrl) {
       return this.daemonClient;
@@ -459,13 +574,18 @@ export class VoiceModeTtsHub {
   private buildFetchForByok(
     settings: VoiceModeExtensionSettings,
     slot: SecretSlot,
+    presetId: string,
+    customBaseUrl?: string,
   ): typeof fetch {
     const baseFetch = this.getBoundFetch();
     if (!settings.useServerPluginProxy) {
       return baseFetch;
     }
     return async (input, init) => {
-      const targetUrl = typeof input === "string" ? input : input instanceof URL ? input.toString() : input.url;
+      const pluginReady = await this.isServerPluginHealthy(baseFetch);
+      if (!pluginReady) {
+        return baseFetch(input, init);
+      }
       const stHeaders = this.options.getRequestHeaders?.() ?? {
         "Content-Type": "application/json",
       };
@@ -473,7 +593,8 @@ export class VoiceModeTtsHub {
         method: "POST",
         headers: stHeaders,
         body: JSON.stringify({
-          targetUrl,
+          presetId,
+          ...(customBaseUrl ? { customBaseUrl } : {}),
           secretSlot: slot,
           upstreamBody: init?.body ? String(init.body) : "{}",
         }),
@@ -503,13 +624,6 @@ export class VoiceModeTtsHub {
       return null;
     }
 
-    const totalBreakMs = plan.segments.reduce(
-      (sum, seg) => sum + (seg.preBreakMs ?? 0),
-      0,
-    );
-    const isWhisper =
-      plan.segments.length > 0 && plan.segments.every((seg) => seg.whisper);
-
     this.pendingInfo.set(envelopeStr, {
       role: parsed.role,
       speaker: parsed.speaker,
@@ -523,23 +637,21 @@ export class VoiceModeTtsHub {
     });
 
     if (assignment.engine === "system") {
+      const sysSegments = buildSystemTtsSegments(parsed.text, plan.segments);
       return this.systemEngine.synthesize(plan.plainText, {
         voice: assignment.voice,
         rate: assignment.rate,
         signal,
-        preBreakMs: totalBreakMs,
-        whisper: isWhisper,
+        segments: sysSegments,
       });
     }
 
     if (assignment.engine === "kokoro-daemon") {
       const client = this.getOrCreateDaemonClient(settings);
-      const effectiveRate = isWhisper
-        ? (assignment.rate ?? 1) * 0.92
-        : assignment.rate;
-      const res = await client.synthesize(plan.plainText, {
+      // Pass raw emotion-tagged text so voice-daemon compiles <whisper> and <break Nms> natively!
+      const res = await client.synthesize(parsed.text, {
         voice: assignment.voice || undefined,
-        rate: effectiveRate,
+        rate: assignment.rate,
         signal,
       });
       if (res.mime === SYSTEM_TTS_MIME) {
@@ -557,7 +669,7 @@ export class VoiceModeTtsHub {
         apiKey: () => this.options.getSecret("mimo"),
         instructions: plan.instructions || undefined,
         fallback: () => this.systemEngine,
-        fetchImpl: this.buildFetchForByok(settings, "mimo"),
+        fetchImpl: this.buildFetchForByok(settings, "mimo", "mimo"),
       });
       return engine.synthesize(plan.plainText, {
         voice: assignment.voice || undefined,
@@ -566,15 +678,21 @@ export class VoiceModeTtsHub {
       });
     }
 
+    const effectivePresetId = assignment.presetId ?? settings.openaiTtsPresetId;
     const engine = new OpenAiCompatTtsEngine({
-      presetId: assignment.presetId ?? settings.openaiTtsPresetId,
+      presetId: effectivePresetId,
       baseUrl: settings.openaiTtsBaseUrl,
       model: settings.openaiTtsModel,
       voice: assignment.voice || undefined,
       apiKey: () => this.options.getSecret("openaiTts"),
       instructions: plan.instructions || undefined,
       fallback: () => this.systemEngine,
-      fetchImpl: this.buildFetchForByok(settings, "openaiTts"),
+      fetchImpl: this.buildFetchForByok(
+        settings,
+        "openaiTts",
+        effectivePresetId,
+        effectivePresetId === "custom" ? settings.openaiTtsBaseUrl : undefined,
+      ),
     });
     return engine.synthesize(plan.plainText, {
       voice: assignment.voice || undefined,

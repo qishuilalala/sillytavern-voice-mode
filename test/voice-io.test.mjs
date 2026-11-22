@@ -65,6 +65,14 @@ test("VoiceModeIoController AEC3 barge-in achieves 20/20 (100% >= 95%) < 600ms c
     assert.equal(startRes.activePolicy, "auto");
 
     const frame = makeSpeechFrame(1024, 300, 0.18);
+    // 2 transient echo frames (128ms) must NOT prematurely self-interrupt non-WASM VAD
+    pushChunk(frame);
+    pushChunk(frame);
+    await new Promise((r) => setTimeout(r, 8));
+    assert.equal(stopGenCalls, 0, "Short <320ms echo transient must not trigger barge-in");
+
+    // Sustained >= 320ms (5 * 64ms = 320ms) speech triggers barge-in cleanly in < 600ms
+    pushChunk(frame);
     pushChunk(frame);
     pushChunk(frame);
 

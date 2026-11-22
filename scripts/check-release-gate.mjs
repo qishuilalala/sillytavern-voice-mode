@@ -15,6 +15,7 @@ assert.equal(manifest.css, "style.css", "manifest.json css must point to style.c
 assert.deepEqual(manifest.requires, [], "manifest.json requires must be empty for zero-Extras loading");
 
 const requiredFiles = [
+  ".gitattributes",
   "manifest.json",
   "style.css",
   "dist/index.js",

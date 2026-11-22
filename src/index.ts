@@ -72,10 +72,6 @@ export async function activate(): Promise<void> {
         },
       },
     });
-    if (typeof window !== "undefined") {
-      (window as unknown as Record<string, unknown>).__sillyTavernVoiceMode =
-        activeRuntime;
-    }
   }
   await activeRuntime.activate();
 }

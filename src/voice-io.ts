@@ -27,6 +27,9 @@ import {
   type WindowOriginLike,
 } from "./settings.ts";
 
+/** Minimum sustained speech chunks for non-WASM energy+spectral VAD (`5 * 64 ms = 320 ms < 600 ms`). */
+export const ENERGY_VAD_CONFIRM_CHUNKS = 5;
+
 function computeZeroCrossingRate(samples: Float32Array): number {
   if (samples.length < 2) return 0;
   let crossings = 0;
@@ -38,16 +41,26 @@ function computeZeroCrossingRate(samples: Float32Array): number {
   return crossings / (samples.length - 1);
 }
 
+function computeCrestFactor(samples: Float32Array, rms: number): number {
+  if (rms <= 0 || samples.length === 0) return Infinity;
+  let peak = 0;
+  for (let i = 0; i < samples.length; i++) {
+    const abs = Math.abs(samples[i]!);
+    if (abs > peak) peak = abs;
+  }
+  return peak / rms;
+}
+
 /**
  * Lightweight zero-WASM in-memory VAD Worker implementing the `@voice-mode/browser`
  * `WorkerLike` contract so `SherpaWorkerClient` + `AecBargeInMonitor` operate out of
  * the box in SillyTavern Git installs without downloading ONNX/WASM bundles.
  */
 export function createEnergyVadWorkerClient(
-  minSpeechRms = 0.012,
+  minSpeechRms = 0.015,
 ): SherpaWorkerClient {
   return new SherpaWorkerClient({
-    createWorkerSource: () => "/* voice-mode energy+zcr vad */",
+    createWorkerSource: () => "/* voice-mode energy+zcr+crest vad */",
     loadModelBinaries: async () => [],
     idleUnloadMs: 0,
     workerFactory: () => {
@@ -77,11 +90,13 @@ export function createEnergyVadWorkerClient(
             const pcm = new Float32Array(raw.pcm);
             const rms = computeChunkRms(pcm);
             const zcr = computeZeroCrossingRate(pcm);
-            const plausibleBand = zcr >= 0.005 && zcr <= 0.45;
+            const crest = computeCrestFactor(pcm, rms);
+            // Reject DC hum, high-freq hiss, and impulsive speaker clicks (crest > 10)
+            const plausibleBand = zcr >= 0.008 && zcr <= 0.42 && crest <= 10;
             const isSpeech = rms >= minSpeechRms && plausibleBand;
             const speechProbability = isSpeech
-              ? Math.min(0.99, 0.5 + rms * 2)
-              : Math.min(0.4, rms * 10);
+              ? Math.min(0.99, 0.55 + rms * 2)
+              : Math.min(0.4, rms * 8);
             respond({
               id: raw.id,
               type: "vad:result",
@@ -123,6 +138,7 @@ export interface VoiceModeIoControllerOptions {
   stopGeneration: () => boolean;
   cancelPlayback: () => void;
   fetchImpl?: typeof fetch;
+  sileroWorkerClient?: SherpaWorkerClient;
   bargeInCaptureAudio?: BargeInCaptureFactory;
   dictationCaptureAudio?: AudioCaptureFactory;
   onBargeInTriggered?: (source: "aec3" | "manual", event?: BargeInEvent) => void;
@@ -142,9 +158,12 @@ export class VoiceModeIoController {
   private dictationState: DictationSessionState = "idle";
   private bargeInCount = 0;
 
+  private readonly ownsVadWorker: boolean;
+
   constructor(options: VoiceModeIoControllerOptions) {
     this.options = options;
-    this.vadWorkerClient = createEnergyVadWorkerClient();
+    this.ownsVadWorker = !options.sileroWorkerClient;
+    this.vadWorkerClient = options.sileroWorkerClient ?? createEnergyVadWorkerClient();
     const win = options.getWindow();
     const ua =
       win && typeof (win.navigator as { userAgent?: string } | undefined)?.userAgent === "string"
@@ -159,6 +178,7 @@ export class VoiceModeIoController {
     this.monitor = new AecBargeInMonitor({
       workerClient: this.vadWorkerClient,
       captureAudio: options.bargeInCaptureAudio,
+      confirmChunks: options.sileroWorkerClient ? 2 : ENERGY_VAD_CONFIRM_CHUNKS,
       isEdge,
       isSafari,
       isMobile,
@@ -318,7 +338,9 @@ export class VoiceModeIoController {
   async dispose(): Promise<void> {
     await this.stopDictation();
     await this.monitor.stop();
-    await this.vadWorkerClient.dispose();
+    if (this.ownsVadWorker) {
+      await this.vadWorkerClient.dispose();
+    }
   }
 
   private setDictationState(state: DictationSessionState): void {

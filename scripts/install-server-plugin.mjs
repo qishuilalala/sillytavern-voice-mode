@@ -1,6 +1,7 @@
 #!/usr/bin/env node
 import fs from "node:fs";
 import path from "node:path";
+import esbuild from "esbuild";
 
 const stRoot = process.argv[2] ? path.resolve(process.argv[2]) : "";
 if (!stRoot) {
@@ -20,7 +21,19 @@ const destDir = path.join(pluginsDir, "voice-mode");
 const destFile = path.join(destDir, "index.mjs");
 
 fs.mkdirSync(destDir, { recursive: true });
-fs.copyFileSync(srcFile, destFile);
+
+// Bundle @voice-mode/core constants & redactor inline so the installed server plugin
+// runs inside SillyTavern without requiring @voice-mode/core in SillyTavern's node_modules.
+await esbuild.build({
+  entryPoints: [srcFile],
+  bundle: true,
+  outfile: destFile,
+  format: "esm",
+  platform: "node",
+  target: "node22",
+  external: ["node:*"],
+  logLevel: "silent",
+});
 
 console.log(`Installed optional server plugin to ${destFile}`);
 console.log("Remember to set 'enableServerPlugins: true' in SillyTavern config.yaml and restart the server.");

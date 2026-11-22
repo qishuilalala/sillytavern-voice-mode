@@ -3,7 +3,11 @@ import test from "node:test";
 
 import { encodeMonoPcm16Wav } from "@voice-mode/core";
 import { ensureExtensionSettings } from "../src/settings.ts";
-import { SYSTEM_TTS_MIME, VoiceModeTtsHub } from "../src/tts-hub.ts";
+import {
+  BrowserAudioSink,
+  SYSTEM_TTS_MIME,
+  VoiceModeTtsHub,
+} from "../src/tts-hub.ts";
 
 function makeSineWavBytes(durationMs = 80, sampleRate = 16000) {
   const count = Math.floor((sampleRate * durationMs) / 1000);
@@ -133,4 +137,141 @@ test("VoiceModeTtsHub falls back from offline kokoro-daemon to system TTS in < 1
   assert.deepEqual(sinks, [SYSTEM_TTS_MIME]);
 
   await hub.dispose();
+});
+
+test("VoiceModeTtsHub forwards raw emotion tags to kokoro-daemon, executes mid-sentence breaks on system TTS, falls back to direct BYOK when server plugin is 404, and reuses one HTMLAudioElement", async () => {
+  const wavBytes = makeSineWavBytes(30);
+
+  // 1. Daemon receives raw <whisper> & <break> tags unstripped
+  const daemonBodies = [];
+  const daemonSettings = ensureExtensionSettings({
+    voice_mode: {
+      enabled: true,
+      defaultVoice: { engine: "kokoro-daemon", voice: "zf_001" },
+      daemonBaseUrl: "http://127.0.0.1:18790",
+    },
+  });
+  const daemonHub = new VoiceModeTtsHub({
+    getSettings: () => daemonSettings,
+    getSecret: async () => null,
+    fetchImpl: async (url, init) => {
+      const u = String(url);
+      if (u.endsWith("/v1/health")) {
+        return new Response(
+          JSON.stringify({ ok: true, service: "voice-daemon", version: "0.1.0", capabilities: ["tts"], voices: ["zf_001"] }),
+          { status: 200, headers: { "content-type": "application/json" } },
+        );
+      }
+      daemonBodies.push(JSON.parse(String(init?.body ?? "{}")));
+      return new Response(wavBytes, { status: 200, headers: { "content-type": "audio/wav" } });
+    },
+    sink: { async play() {} },
+  });
+
+  daemonHub.enqueueUtterance({
+    role: "character",
+    speaker: "Alice",
+    text: "<whisper>Secret plan.</whisper> <break 250ms> Move now.",
+  });
+  await daemonHub.waitUntilDrained();
+  assert.equal(daemonBodies.length, 1);
+  assert.match(daemonBodies[0].input, /<whisper>Secret plan\.<\/whisper>/);
+  assert.match(daemonBodies[0].input, /<break 250ms>/);
+  await daemonHub.dispose();
+
+  // 2. System TTS payload preserves per-segment mid-sentence breakAfterMs and whisper flags
+  let capturedSystemPayload = null;
+  const sysSettings = ensureExtensionSettings({
+    voice_mode: { enabled: true, defaultVoice: { engine: "system", voice: "" } },
+  });
+  const sysHub = new VoiceModeTtsHub({
+    getSettings: () => sysSettings,
+    getSecret: async () => null,
+    sink: {
+      async play(payload) {
+        capturedSystemPayload = JSON.parse(new TextDecoder().decode(payload.audio));
+      },
+    },
+  });
+  sysHub.enqueueUtterance({
+    role: "character",
+    speaker: "Alice",
+    text: "Wait here <break 120ms> <whisper>stay low</whisper>",
+  });
+  await sysHub.waitUntilDrained();
+  assert.ok(Array.isArray(capturedSystemPayload?.segments));
+  assert.equal(capturedSystemPayload.segments.length, 2);
+  assert.equal(capturedSystemPayload.segments[0].text, "Wait here");
+  assert.equal(capturedSystemPayload.segments[0].breakAfterMs, 120);
+  assert.equal(capturedSystemPayload.segments[1].text, "stay low");
+  assert.equal(capturedSystemPayload.segments[1].whisper, true);
+  await sysHub.dispose();
+
+  // 3. useServerPluginProxy: true with 404 /api/plugins/voice-mode/health falls back to direct OpenAI TTS (not system!)
+  const proxyCalls = [];
+  const playedMimes = [];
+  const proxySettings = ensureExtensionSettings({
+    voice_mode: {
+      enabled: true,
+      useServerPluginProxy: true,
+      openaiTtsPresetId: "custom",
+      openaiTtsBaseUrl: "http://127.0.0.1:18199/v1",
+      defaultVoice: { engine: "openai-compat", voice: "alloy", presetId: "custom" },
+    },
+  });
+  const proxyHub = new VoiceModeTtsHub({
+    getSettings: () => proxySettings,
+    getSecret: async () => null,
+    fetchImpl: async (url) => {
+      const u = String(url);
+      proxyCalls.push(u);
+      if (u === "/api/plugins/voice-mode/health") {
+        return new Response("Not Found", { status: 404 });
+      }
+      return new Response(wavBytes, { status: 200, headers: { "content-type": "audio/wav" } });
+    },
+    sink: {
+      async play(payload) {
+        playedMimes.push(payload.mime);
+      },
+    },
+  });
+  proxyHub.enqueueUtterance({ role: "character", speaker: "Bob", text: "Direct fallback works." });
+  await proxyHub.waitUntilDrained();
+  assert.ok(proxyCalls.includes("/api/plugins/voice-mode/health"));
+  assert.ok(proxyCalls.includes("http://127.0.0.1:18199/v1/audio/speech"));
+  assert.deepEqual(playedMimes, ["audio/wav"]);
+  await proxyHub.dispose();
+
+  // 4. BrowserAudioSink reuses a single persistent HTMLAudioElement across sentences
+  let audioCtorCount = 0;
+  const prevAudio = globalThis.Audio;
+  class FakeAudioElement {
+    constructor(src = "") {
+      audioCtorCount++;
+      this.src = src;
+      this.onended = null;
+      this.onerror = null;
+    }
+    pause() {}
+    removeAttribute(attr) {
+      if (attr === "src") this.src = "";
+    }
+    load() {}
+    async play() {
+      queueMicrotask(() => this.onended?.());
+    }
+  }
+  globalThis.Audio = FakeAudioElement;
+  try {
+    const sink = new BrowserAudioSink();
+    const ac = new AbortController();
+    await sink.play({ audio: wavBytes, mime: "audio/wav" }, ac.signal);
+    await sink.play({ audio: wavBytes, mime: "audio/wav" }, ac.signal);
+    await sink.play({ audio: wavBytes, mime: "audio/wav" }, ac.signal);
+    assert.equal(audioCtorCount, 1, "Must reuse one persistent HTMLAudioElement for AEC3 convergence");
+    sink.stop();
+  } finally {
+    globalThis.Audio = prevAudio;
+  }
 });

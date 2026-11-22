@@ -18,10 +18,14 @@ test("ensureExtensionSettings normalizes VoiceMap and strips accidental plaintex
       narrationSplitEnabled: true,
       apiKey: "sk-proj-1234567890abcdefghijklmnop",
       daemonToken: "secret-daemon-token-999999",
+      openaiTtsBaseUrl: "https://user:pass@evil.example/v1",
+      asrBaseUrl: "https://api.example.com/v1?api_key=AIzaSySecretKey1234567890",
+      mimoModel: "gsk_1234567890abcdef",
+      asrModel: "sk-vmd-1234567890abcdef",
       voiceMap: {
         Alice: { engine: "kokoro-daemon", voice: "zf_001" },
         "bob.png": "alloy",
-        BadEntry: { engine: "openai-compat", voice: "nova", apiKey: "sk-leak-9999999999999999" },
+        BadEntry: { engine: "openai-compat", voice: "AIzaSyLeak1234567890", apiKey: "sk-leak-9999999999999999" },
       },
       asrReplacements: [{ from: ["希尔薇"], to: "Sylvie" }],
     },
@@ -33,13 +37,15 @@ test("ensureExtensionSettings normalizes VoiceMap and strips accidental plaintex
   assert.equal(settings.narrationSplitEnabled, true);
   assert.deepEqual(settings.voiceMap.Alice, { engine: "kokoro-daemon", voice: "zf_001" });
   assert.deepEqual(settings.voiceMap["bob.png"], { engine: "system", voice: "alloy" });
-  assert.deepEqual(settings.voiceMap.BadEntry, { engine: "openai-compat", voice: "nova" });
+  assert.deepEqual(settings.voiceMap.BadEntry, { engine: "openai-compat", voice: "" });
+  assert.equal(settings.openaiTtsBaseUrl, DEFAULT_SETTINGS.openaiTtsBaseUrl);
+  assert.equal(settings.asrBaseUrl, DEFAULT_SETTINGS.asrBaseUrl);
+  assert.equal(settings.mimoModel, DEFAULT_SETTINGS.mimoModel);
+  assert.equal(settings.asrModel, DEFAULT_SETTINGS.asrModel);
   assert.deepEqual(settings.asrReplacements, [{ from: ["希尔薇"], to: "Sylvie" }]);
 
   const serialized = JSON.stringify(store);
-  assert.doesNotMatch(serialized, /sk-proj-/);
-  assert.doesNotMatch(serialized, /sk-leak-/);
-  assert.doesNotMatch(serialized, /secret-daemon-token/);
+  assert.doesNotMatch(serialized, /sk-proj-|sk-leak-|secret-daemon-token|user:pass|AIzaSy|gsk_|sk-vmd-/);
   assert.equal(DEFAULT_SETTINGS.enabled, true);
 });
 
@@ -94,6 +100,11 @@ test("inspectSecureOrigin detects non-secure LAN HTTP and formatSafeError redact
     location: { protocol: "http:", hostname: "127.0.0.1", host: "127.0.0.1:18123" },
   });
   assert.equal(local.secure, true);
+
+  // Fail-closed when win or isSecureContext is missing/undefined
+  assert.equal(inspectSecureOrigin(undefined).secure, false);
+  assert.equal(inspectSecureOrigin(null).secure, false);
+  assert.equal(inspectSecureOrigin({}).secure, false);
 
   const safeMsg = formatSafeError(
     new Error("Upstream failed with Authorization: Bearer sk-secret-abcdef1234567890"),

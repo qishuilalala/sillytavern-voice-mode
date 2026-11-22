@@ -122,3 +122,25 @@ test("StreamingUtteranceRouter discards buffered tail immediately on GENERATION_
   router.onGenerationEnded();
   assert.equal(emitted.length, 0);
 });
+
+test("StreamingUtteranceRouter carries open <whisper> state across multi-sentence splits", () => {
+  const emitted = [];
+  const router = new StreamingUtteranceRouter({
+    narrationSplitEnabled: true,
+    onUtterance: (u) => emitted.push(u),
+  });
+
+  router.onGenerationStarted({ type: "normal", dryRun: false, speaker: "Lyra" });
+  router.onStreamToken('"<whisper>Sentence one is hushed. ');
+  assert.equal(emitted.length, 1);
+  assert.equal(emitted[0].text, "<whisper>Sentence one is hushed.</whisper>");
+
+  router.onStreamToken(
+    '"<whisper>Sentence one is hushed. Sentence two stays hushed.</whisper> Normal voice returns."',
+  );
+  router.onGenerationEnded();
+
+  assert.equal(emitted.length, 3);
+  assert.equal(emitted[1].text, "<whisper>Sentence two stays hushed.</whisper>");
+  assert.equal(emitted[2].text, "Normal voice returns.");
+});
