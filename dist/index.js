@@ -26,8 +26,82 @@ var INLINE_SENTENCE_END_RE = /[。！？!?；;…]/;
 var TABLE_DELIM_CELL_RE = /^:?-+:?$/;
 var TABLE_DELIM_CHARS_RE = /^[\s|:-]*$/;
 var UNESCAPED_PIPE_RE = /(?:^|[^\\])\|/;
-var FRONTMATTER_BLOCK_RE = /^(?:\uFEFF)?---[ \t]*\r?\n[\s\S]*?\r?\n(?:---|\.\.\.)[ \t]*(?:\r?\n|$)/;
 var FENCE_LANG_PREFIX_RE = /^[ \t]*[A-Za-z0-9_+.#-]{1,32}[ \t]*\r?\n/;
+var MAX_FRONTMATTER_KEY_CHARS = 120;
+var YAML_CLOSE = /^(?:---|\.\.\.)[ \t]*$/;
+var YAML_HEADER = /^[ \t]*(?:-[ \t]+)?(?:[\p{L}\p{N}_.-]+|"(?:[^"\\]|\\.)*"|'(?:[^']|'')*')[ \t]*:/u;
+var YAML_KEY_PREFIX = /^[ \t]*(?:-[ \t]+)?(?:[\p{L}\p{N}_.-]+[ \t]*|"(?:[^"\\]|\\.)*(?:\\|"[ \t]*)?|'(?:[^']|'')*(?:'[ \t]*)?)$/u;
+function classifyFirstLine(line, complete) {
+  if (/^[ \t]*#/.test(line))
+    return "metadata";
+  if (/^[ \t]*$/.test(line))
+    return "pending";
+  const header = YAML_HEADER.exec(line.slice(0, MAX_FRONTMATTER_KEY_CHARS + 1));
+  if (header) {
+    const next = line[header[0].length];
+    if (next === void 0)
+      return complete ? "metadata" : "pending";
+    return next === " " || next === "	" ? "metadata" : "body";
+  }
+  if (!complete && YAML_CLOSE.test(line))
+    return "pending";
+  if (!complete && line.length <= MAX_FRONTMATTER_KEY_CHARS) {
+    if (isHighSurrogate(line.charCodeAt(line.length - 1)) || YAML_KEY_PREFIX.test(line))
+      return "pending";
+  }
+  return "body";
+}
+var LeadingFrontmatter = class {
+  phase = "opening";
+  partial = "";
+  held = "";
+  release(body) {
+    this.phase = "body";
+    this.partial = "";
+    this.held = "";
+    return body;
+  }
+  read(chunk, final = false) {
+    if (this.phase === "body")
+      return chunk;
+    let start = 0;
+    for (; ; ) {
+      const nl = chunk.indexOf("\n", start);
+      const complete = nl !== -1 || final;
+      this.partial += nl === -1 ? chunk.slice(start) : chunk.slice(start, nl);
+      if (!complete && this.phase === "metadata")
+        return "";
+      const line = this.partial.endsWith("\r") ? this.partial.slice(0, -1) : this.partial;
+      const rest = nl === -1 ? "" : chunk.slice(nl + 1);
+      if (this.phase === "opening") {
+        if (!complete && /^\uFEFF?(?:-{0,2}|---[ \t]*)$/.test(line))
+          return "";
+        if (nl === -1 || !/^\uFEFF?---[ \t]*$/.test(line)) {
+          return this.release(this.partial + (nl === -1 ? "" : "\n" + rest));
+        }
+        this.phase = "first";
+      } else {
+        if (complete && YAML_CLOSE.test(line))
+          return this.release(rest);
+        if (this.phase === "first") {
+          const kind = classifyFirstLine(line, complete);
+          if (kind === "body") {
+            return this.release(this.held + this.partial + (nl === -1 ? "" : "\n" + rest));
+          }
+          if (kind === "metadata")
+            this.phase = "metadata";
+        }
+        if (nl === -1)
+          return final ? this.release(this.held + this.partial) : "";
+        this.held += this.partial + "\n";
+      }
+      this.partial = "";
+      start = nl + 1;
+      if (start === chunk.length && !final)
+        return "";
+    }
+  }
+};
 function hasNonDecimalPeriodEnd(text) {
   for (let i = 0; i < text.length; i++) {
     if (text.charCodeAt(i) !== 46)
@@ -123,9 +197,8 @@ function stripMarkdownTables(text, options = {}) {
   }
   return out.join("\n");
 }
-function plainText(text, options = {}) {
-  const withoutFrontmatter = String(text).replace(FRONTMATTER_BLOCK_RE, "");
-  const withoutFences = withoutFrontmatter.replace(/`{3,}[\s\S]*?`{3,}/g, " ").replace(/~{3,}[\s\S]*?~{3,}/g, " ");
+function cleanMarkdownBody(text, options) {
+  const withoutFences = text.replace(/`{3,}[\s\S]*?`{3,}/g, " ").replace(/~{3,}[\s\S]*?~{3,}/g, " ");
   const withoutMath = withoutFences.replace(/\$\$[\s\S]*?\$\$/g, " ");
   const withoutTables = stripMarkdownTables(withoutMath, options);
   return withoutTables.replace(/`([^`]*)`/g, "$1").replace(/!\[\[[^\]]*\]\]/g, " ").replace(/\[\[([^\]|]+)\|([^\]]+)\]\]/g, "$2").replace(/\[\[([^\]]+)\]\]/g, "$1").replace(/!\[[^\]]*\]\([^)]*\)/g, " ").replace(/\[([^\]]*)\]\([^)]*\)/g, "$1").replace(/<https?:\/\/[^\s<>]+>/gi, " ").replace(/https?:\/\/[^\s<>()[\]"'”’），。！？、；：]+/gi, " ").replace(/^[ \t]*>[ \t]*\[![A-Za-z0-9_-]+\][+-]?(?:[ \t]+(.*))?$/gm, "$1").replace(/^#{1,6}\s+/gm, "").replace(/^(?:[ \t]*>[ \t]?)+/gm, "").replace(/\*\*([^*]+)\*\*/g, "$1").replace(/\*([^*]+)\*/g, "$1").replace(/^[-*+]\s+/gm, "").replace(/^\d+\.\s+/gm, "").replace(/^[-*_]{3,}\s*$/gm, " ").replace(/<\/?(?:b|i|u|br|p|span|div|strong|em|s|sub|sup|h[1-6]|ul|ol|li|a|img|code|pre|blockquote|hr|table|tr|td|th)\b[^>]*>/gi, " ");
@@ -180,9 +253,7 @@ var SentenceSegmenter = class {
   tablePolicy;
   tablePlaceholder;
   // YAML frontmatter state (document start only)
-  docStartChecked = false;
-  inFrontmatter = false;
-  frontmatterBuf = "";
+  frontmatter = new LeadingFrontmatter();
   // Cross-delta code fence state (` ``` ` and `~~~`)
   fenceChar = null;
   hangChars = "";
@@ -210,43 +281,6 @@ var SentenceSegmenter = class {
 `;
     }
     return "\n";
-  }
-  /** Strip leading YAML frontmatter (`--- ... ---`) across deltas; falls back cleanly on flush if unclosed. */
-  dropFrontmatter(chunk) {
-    if (this.docStartChecked && !this.inFrontmatter)
-      return chunk;
-    this.frontmatterBuf = (this.frontmatterBuf + chunk).replace(/\r\n/g, "\n");
-    if (!this.docStartChecked) {
-      const probe = this.frontmatterBuf.replace(/^\uFEFF/, "");
-      if (probe.length === 0)
-        return "";
-      const nl = probe.indexOf("\n");
-      if (nl === -1) {
-        if (/^-{1,3}[ \t]*\r?$/.test(probe))
-          return "";
-        this.docStartChecked = true;
-        const released = this.frontmatterBuf;
-        this.frontmatterBuf = "";
-        return released;
-      }
-      const firstLine = probe.slice(0, nl);
-      this.docStartChecked = true;
-      if (/^---[ \t]*$/.test(firstLine)) {
-        this.inFrontmatter = true;
-        this.frontmatterBuf = probe.slice(nl + 1);
-      } else {
-        const released = this.frontmatterBuf;
-        this.frontmatterBuf = "";
-        return released;
-      }
-    }
-    const closeMatch = /(?:^|\n)(?:---|\.\.\.)[ \t]*\n/.exec(this.frontmatterBuf);
-    if (!closeMatch)
-      return "";
-    const rest = this.frontmatterBuf.slice(closeMatch.index + closeMatch[0].length);
-    this.inFrontmatter = false;
-    this.frontmatterBuf = "";
-    return rest;
   }
   /** Cross-delta fenced code block filter supporting both ` ``` ` and `~~~`. */
   dropFences(chunk) {
@@ -428,7 +462,7 @@ var SentenceSegmenter = class {
     return out;
   }
   cleanCompleteText(raw) {
-    return plainText(raw, {
+    return cleanMarkdownBody(raw, {
       policy: this.tablePolicy,
       placeholder: this.tablePlaceholder
     });
@@ -511,7 +545,7 @@ var SentenceSegmenter = class {
   feed(chunk) {
     if (!chunk)
       return [];
-    const noFrontmatter = this.dropFrontmatter(chunk);
+    const noFrontmatter = this.frontmatter.read(chunk);
     const noFence = noFrontmatter ? this.dropFences(noFrontmatter) : "";
     const noMath = noFence ? this.dropBlockMath(noFence) : "";
     const noTable = noMath ? this.filterTables(noMath) : "";
@@ -524,18 +558,8 @@ var SentenceSegmenter = class {
   }
   /** Flush remaining buffered text at end-of-stream and reset internal state. */
   flush() {
-    let tailRaw = "";
-    if (!this.docStartChecked && this.frontmatterBuf) {
-      tailRaw += this.frontmatterBuf;
-    } else if (this.inFrontmatter && this.frontmatterBuf) {
-      const eofClose = /(?:^|\n)(?:---|\.\.\.)[ \t]*\r?$/.exec(this.frontmatterBuf);
-      if (!eofClose) {
-        tailRaw += this.frontmatterBuf;
-      }
-    }
-    this.docStartChecked = false;
-    this.inFrontmatter = false;
-    this.frontmatterBuf = "";
+    let tailRaw = this.frontmatter.read("", true);
+    this.frontmatter = new LeadingFrontmatter();
     if (this.hangChars) {
       if (this.fenceChar !== null)
         this.fenced += this.hangChars;
@@ -1178,12 +1202,8 @@ function resolveEndpointPolicy(partial = {}) {
   };
 }
 
-// node_modules/.pnpm/@voice-mode+core@file+vendor+voice-mode-core-0.1.0.tgz/node_modules/@voice-mode/core/dist/model-manifest.js
-var UTF8_DECODER = new TextDecoder("utf-8");
-var NODE_PATH_TARGET = ["var nodePath=req", 'uire("path");'].join("");
-
 // node_modules/.pnpm/@voice-mode+core@file+vendor+voice-mode-core-0.1.0.tgz/node_modules/@voice-mode/core/dist/http-stream.js
-var UTF8_DECODER2 = new TextDecoder("utf-8");
+var UTF8_DECODER = new TextDecoder("utf-8");
 function scheduleTimeout(callback, ms) {
   const fn = typeof setTimeout === "function" ? setTimeout : void 0;
   if (!fn) {
@@ -1283,7 +1303,7 @@ async function readRedactedHttpErrorMessage(res, maxErrorBytes, maxMessageChars,
     let rawText = "";
     if (!res.body || typeof res.body.getReader !== "function") {
       const ab = await raceAbort(res.arrayBuffer(), signal);
-      rawText = UTF8_DECODER2.decode(new Uint8Array(ab, 0, Math.min(ab.byteLength, maxErrorBytes)));
+      rawText = UTF8_DECODER.decode(new Uint8Array(ab, 0, Math.min(ab.byteLength, maxErrorBytes)));
     } else {
       const reader = res.body.getReader();
       const chunks = [];
@@ -1311,7 +1331,7 @@ async function readRedactedHttpErrorMessage(res, maxErrorBytes, maxMessageChars,
         merged.set(c, off);
         off += c.byteLength;
       }
-      rawText = UTF8_DECODER2.decode(merged);
+      rawText = UTF8_DECODER.decode(merged);
     }
     const redacted = redactSecrets(rawText).replace(/\s+/g, " ").trim();
     if (!redacted)
@@ -1404,7 +1424,7 @@ var MAX_TTS_ERROR_BYTES = 8 * 1024;
 var MAX_ERROR_MESSAGE_CHARS = 240;
 var DEFAULT_TIMEOUT_MS = 3e4;
 var DEFAULT_COOLDOWN_MS = 6e4;
-var UTF8_DECODER3 = new TextDecoder("utf-8");
+var UTF8_DECODER2 = new TextDecoder("utf-8");
 var TtsProviderError = class extends Error {
   code;
   status;
@@ -1449,7 +1469,7 @@ function sniffAudioMime(bytes, contentTypeHeader) {
   const mediaType = (contentTypeHeader.split(";")[0] ?? "").trim().toLowerCase();
   if (!/^audio\/[a-z0-9][a-z0-9!#$&^_.+-]*$/.test(mediaType))
     return null;
-  const prefix = UTF8_DECODER3.decode(bytes.subarray(0, 64)).trimStart();
+  const prefix = UTF8_DECODER2.decode(bytes.subarray(0, 64)).trimStart();
   if (prefix.startsWith("<") || prefix.startsWith("{") || prefix.startsWith("[")) {
     return null;
   }
@@ -1908,7 +1928,7 @@ var MimoTtsEngine = class extends HttpTtsEngineBase {
       throw new TtsProviderError("http_error", msg, res.status);
     }
     const rawBytes = await readBoundedStreamBytes(res, MAX_MIMO_JSON_BYTES, signal, () => new TtsProviderError("too_large", `MiMo JSON response exceeds ${MAX_MIMO_JSON_BYTES} bytes`));
-    const rawJson = UTF8_DECODER3.decode(rawBytes);
+    const rawJson = UTF8_DECODER2.decode(rawBytes);
     let parsed;
     try {
       parsed = JSON.parse(rawJson);
@@ -1944,7 +1964,7 @@ var DEFAULT_ASR_TIMEOUT_MS = 45e3;
 var DEFAULT_SAMPLE_RATE = 16e3;
 var TRANSCRIPTIONS_SUFFIX = "/audio/transcriptions";
 var UTF8_ENCODER2 = new TextEncoder();
-var UTF8_DECODER4 = new TextDecoder("utf-8");
+var UTF8_DECODER3 = new TextDecoder("utf-8");
 var AsrProviderError = class extends Error {
   code;
   status;
@@ -2244,7 +2264,7 @@ var OpenAiCompatAsrTransport = class {
       if (abortedByTransport || callerAborted || options?.signal?.aborted) {
         throw new AsrProviderError("aborted", "ASR transcription was aborted");
       }
-      const rawText = UTF8_DECODER4.decode(bodyBytes);
+      const rawText = UTF8_DECODER3.decode(bodyBytes);
       const contentType = (res.headers.get("content-type") ?? "").toLowerCase();
       if (contentType.includes("text/plain")) {
         return {
@@ -2318,7 +2338,7 @@ var EXPECTED_DAEMON_SERVICE = "voice-daemon";
 var MAX_HEALTH_BYTES = 64 * 1024;
 var MAX_ERROR_MESSAGE_CHARS3 = 240;
 var DEFAULT_SAMPLE_RATE2 = 16e3;
-var UTF8_DECODER5 = new TextDecoder("utf-8");
+var UTF8_DECODER4 = new TextDecoder("utf-8");
 var DaemonClientError = class extends Error {
   code;
   status;
@@ -2484,7 +2504,7 @@ var DaemonClient = class {
         };
       }
       const body = await readBoundedStreamBytes(res, MAX_HEALTH_BYTES, ac.signal, () => new DaemonClientError("too_large", `Daemon health exceeds ${MAX_HEALTH_BYTES} bytes`));
-      const parsed = JSON.parse(UTF8_DECODER5.decode(body));
+      const parsed = JSON.parse(UTF8_DECODER4.decode(body));
       if (typeof parsed !== "object" || parsed === null) {
         const err = new DaemonClientError("bad_response", "Daemon health endpoint returned invalid JSON object");
         this.markUnhealthy(err);
@@ -2870,7 +2890,7 @@ var DaemonClient = class {
       if (localAborted || callerAborted || options?.signal?.aborted) {
         throw new DaemonClientError("aborted", "Daemon ASR transcription was aborted");
       }
-      const rawText = UTF8_DECODER5.decode(body);
+      const rawText = UTF8_DECODER4.decode(body);
       const contentType = (res.headers.get("content-type") ?? "").toLowerCase();
       if (contentType.includes("text/plain")) {
         return { text: rawText.trim(), isFinal: true, durationMs };
@@ -4067,618 +4087,6 @@ function isWorkerResponse(msg) {
   const rec = msg;
   return typeof rec.id === "number" && Number.isInteger(rec.id) && rec.id >= 0 && typeof rec.type === "string" && RESPONSE_TYPES.has(rec.type);
 }
-
-// node_modules/.pnpm/@voice-mode+browser@file+vendor+voice-mode-browser-0.1.0.tgz/node_modules/@voice-mode/browser/dist/sherpa-worker-runtime.js
-var SHERPA_WORKER_HANDLER_BODY = `
-;(function () {
-  "use strict";
-
-  let wasmMod = null;
-  let vad = null;
-  let offlineAsr = null;
-  let offlineTts = null;
-  let vadCarry = new Float32Array(0);
-  let opQueue = Promise.resolve();
-
-  function nowMs() {
-    return typeof performance !== "undefined" && typeof performance.now === "function"
-      ? performance.now()
-      : Date.now();
-  }
-
-  function makeWorkerError(code, message) {
-    const err = new Error(message);
-    err.workerCode = code;
-    return err;
-  }
-
-  function reply(msg, transfer) {
-    if (transfer && transfer.length > 0) {
-      self.postMessage(msg, transfer);
-    } else {
-      self.postMessage(msg);
-    }
-  }
-
-  function ensureDir(FS, dirPath) {
-    if (!FS) return;
-    if (typeof FS.mkdirTree === "function") {
-      FS.mkdirTree(dirPath);
-      return;
-    }
-    if (typeof FS.mkdir !== "function") return;
-    const parts = dirPath.split("/").filter(Boolean);
-    let current = "";
-    for (let i = 0; i < parts.length; i++) {
-      current += "/" + parts[i];
-      try {
-        FS.mkdir(current);
-      } catch (_err) {
-        // Directory already exists in MEMFS.
-      }
-    }
-  }
-
-  function safeUnlink(FS, filePath) {
-    if (!FS || typeof FS.unlink !== "function") return;
-    try {
-      FS.unlink(filePath);
-    } catch (_err) {
-      // Ignore missing path.
-    }
-  }
-
-  function mountZeroCopy(FS, fullPath, arrayBuffer) {
-    const slashIdx = fullPath.lastIndexOf("/");
-    if (slashIdx > 0) {
-      ensureDir(FS, fullPath.slice(0, slashIdx));
-    }
-    safeUnlink(FS, fullPath);
-    const bytes = arrayBuffer instanceof Uint8Array ? arrayBuffer : new Uint8Array(arrayBuffer);
-    const stream = FS.open(fullPath, "w+");
-    try {
-      FS.write(stream, bytes, 0, bytes.byteLength, 0, true);
-    } finally {
-      if (typeof FS.close === "function") {
-        FS.close(stream);
-      }
-    }
-  }
-
-  function normalizeRelName(rawName) {
-    const cleaned = String(rawName || "").replace(/^\\/+|^\\.\\/+/, "");
-    const parts = cleaned.split("/");
-    if (!cleaned || parts.some((seg) => !seg || seg === "." || seg === "..")) {
-      throw makeWorkerError("model_load_failed", "Unsafe model filename: " + String(rawName));
-    }
-    return cleaned;
-  }
-
-  function baseName(pathStr) {
-    const idx = pathStr.lastIndexOf("/");
-    return idx >= 0 ? pathStr.slice(idx + 1) : pathStr;
-  }
-
-  function freeInstance(inst) {
-    if (inst && typeof inst.free === "function") {
-      try {
-        inst.free();
-      } catch (_err) {
-        // Ignore teardown errors on superseded instances.
-      }
-    }
-  }
-
-  function encodeWavPcm16(samples, sampleRate) {
-    const rate = Number.isFinite(sampleRate) && sampleRate > 0 ? Math.round(sampleRate) : 22050;
-    const dataBytes = samples.length * 2;
-    const wavBuffer = new ArrayBuffer(44 + dataBytes);
-    const view = new DataView(wavBuffer);
-
-    view.setUint8(0, 0x52);
-    view.setUint8(1, 0x49);
-    view.setUint8(2, 0x46);
-    view.setUint8(3, 0x46);
-    view.setUint32(4, 36 + dataBytes, true);
-    view.setUint8(8, 0x57);
-    view.setUint8(9, 0x41);
-    view.setUint8(10, 0x56);
-    view.setUint8(11, 0x45);
-    view.setUint8(12, 0x66);
-    view.setUint8(13, 0x6d);
-    view.setUint8(14, 0x74);
-    view.setUint8(15, 0x20);
-    view.setUint32(16, 16, true);
-    view.setUint16(20, 1, true);
-    view.setUint16(22, 1, true);
-    view.setUint32(24, rate, true);
-    view.setUint32(28, rate * 2, true);
-    view.setUint16(32, 2, true);
-    view.setUint16(34, 16, true);
-    view.setUint8(36, 0x64);
-    view.setUint8(37, 0x61);
-    view.setUint8(38, 0x74);
-    view.setUint8(39, 0x61);
-    view.setUint32(40, dataBytes, true);
-
-    for (let i = 0; i < samples.length; i++) {
-      const s = samples[i];
-      const clamped = Number.isFinite(s) ? Math.max(-1, Math.min(1, s)) : 0;
-      const pcm = clamped < 0 ? Math.round(clamped * 32768) : Math.round(clamped * 32767);
-      view.setInt16(44 + i * 2, Math.max(-32768, Math.min(32767, pcm)), true);
-    }
-    return wavBuffer;
-  }
-
-  async function handleModelLoad(req) {
-    const t0 = nowMs();
-    const files = Array.isArray(req.files) ? req.files : [];
-    const config = req.config || {};
-
-    if (!wasmMod) {
-      const wasmFile = files.find(
-        (f) =>
-          f &&
-          typeof f.name === "string" &&
-          (f.name === "sherpa-onnx.wasm" || f.name.toLowerCase().endsWith(".wasm")),
-      );
-      if (!wasmFile || !(wasmFile.buffer instanceof ArrayBuffer)) {
-        throw makeWorkerError(
-          "model_load_failed",
-          "WASM binary (sherpa-onnx.wasm) is required when initializing Sherpa Module",
-        );
-      }
-      wasmMod = await Module({
-        wasmBinary: wasmFile.buffer,
-        print: () => {},
-        printErr: () => {},
-      });
-    }
-
-    const FS = wasmMod && wasmMod.FS;
-    if (!FS) {
-      throw makeWorkerError("model_load_failed", "Emscripten FS is unavailable on WASM Module");
-    }
-
-    const modelFiles = files.filter(
-      (f) => f && typeof f.name === "string" && !f.name.toLowerCase().endsWith(".wasm"),
-    );
-
-    if (req.target === "vad") {
-      const vadFile =
-        modelFiles.find((f) => baseName(f.name) === "silero_vad.onnx") ||
-        modelFiles.find((f) => f.name.toLowerCase().endsWith(".onnx"));
-      if (!vadFile || !(vadFile.buffer instanceof ArrayBuffer)) {
-        throw makeWorkerError("model_load_failed", "Missing silero_vad.onnx in model:load files");
-      }
-
-      const vadPath = "/models/vad/silero_vad.onnx";
-      mountZeroCopy(FS, vadPath, vadFile.buffer);
-      freeInstance(vad);
-      vad = null;
-      vadCarry = new Float32Array(0);
-
-      try {
-        vad = SherpaVad.createVad(wasmMod, {
-          sileroVad: {
-            model: vadPath,
-            threshold: Number(config.threshold ?? 0.45),
-            minSilenceDuration: Number(config.minSilenceDuration ?? 0.35),
-            minSpeechDuration: Number(config.minSpeechDuration ?? 0.15),
-            maxSpeechDuration: Number(config.maxSpeechDuration ?? 20),
-            windowSize: 512,
-          },
-          sampleRate: 16000,
-          numThreads: 1,
-          provider: "cpu",
-          debug: 0,
-          bufferSizeInSeconds: 60,
-        });
-        if (!vad || ("handle" in vad && !vad.handle)) {
-          vad = null;
-          throw makeWorkerError("model_load_failed", "SherpaVad.createVad returned null handle");
-        }
-      } finally {
-        safeUnlink(FS, vadPath);
-      }
-
-      reply({
-        id: req.id,
-        type: "model:loaded",
-        target: "vad",
-        elapsedMs: Math.max(0, Math.round(nowMs() - t0)),
-      });
-      return;
-    }
-
-    if (req.target === "asr-offline") {
-      const onnxFile =
-        modelFiles.find((f) => baseName(f.name) === "model.int8.onnx") ||
-        modelFiles.find((f) => f.name.toLowerCase().endsWith(".onnx"));
-      const tokensFile = modelFiles.find((f) => baseName(f.name) === "tokens.txt");
-      if (!onnxFile || !(onnxFile.buffer instanceof ArrayBuffer)) {
-        throw makeWorkerError("model_load_failed", "Missing model.int8.onnx in model:load files");
-      }
-      if (!tokensFile || !(tokensFile.buffer instanceof ArrayBuffer)) {
-        throw makeWorkerError("model_load_failed", "Missing tokens.txt in model:load files");
-      }
-
-      // Single-heavy-model guard (ADR-0002): evict VITS before mounting SenseVoice so
-      // SenseVoice (239 MB) and VITS (121 MB) never stay co-resident in WASM heap.
-      // Lightweight Silero VAD (1.8 MB) remains untouched.
-      freeInstance(offlineTts);
-      offlineTts = null;
-      freeInstance(offlineAsr);
-      offlineAsr = null;
-
-      const modelPath = "/models/sense/model.int8.onnx";
-      const tokensPath = "/models/sense/tokens.txt";
-      mountZeroCopy(FS, modelPath, onnxFile.buffer);
-      mountZeroCopy(FS, tokensPath, tokensFile.buffer);
-
-      try {
-        offlineAsr = new SherpaAsr.OfflineRecognizer(
-          {
-            featConfig: { sampleRate: 16000, featureDim: 80 },
-            modelConfig: {
-              senseVoice: {
-                model: modelPath,
-                language: String(config.language ?? "auto"),
-                useInverseTextNormalization: config.useItn === false ? 0 : 1,
-              },
-              tokens: tokensPath,
-              numThreads: 1,
-              provider: "cpu",
-              debug: 0,
-            },
-          },
-          wasmMod,
-        );
-        if (!offlineAsr || ("handle" in offlineAsr && !offlineAsr.handle)) {
-          offlineAsr = null;
-          throw makeWorkerError(
-            "model_load_failed",
-            "SherpaAsr.OfflineRecognizer returned null handle",
-          );
-        }
-      } finally {
-        safeUnlink(FS, modelPath);
-      }
-
-      reply({
-        id: req.id,
-        type: "model:loaded",
-        target: "asr-offline",
-        elapsedMs: Math.max(0, Math.round(nowMs() - t0)),
-      });
-      return;
-    }
-
-    if (req.target === "tts-vits") {
-      if (modelFiles.length === 0) {
-        throw makeWorkerError("model_load_failed", "Missing VITS files in model:load request");
-      }
-      const normalizedEntries = modelFiles.map((file) => ({
-        file,
-        rel: normalizeRelName(file.name),
-      }));
-
-      // Single-heavy-model guard (ADR-0002): evict SenseVoice before mounting VITS so
-      // SenseVoice (239 MB) and VITS (121 MB) never stay co-resident in WASM heap.
-      // Lightweight Silero VAD (1.8 MB) remains untouched.
-      freeInstance(offlineAsr);
-      offlineAsr = null;
-      freeInstance(offlineTts);
-      offlineTts = null;
-
-      let modelPath = typeof config.model === "string" ? config.model : "";
-      let lexiconPath = typeof config.lexicon === "string" ? config.lexicon : "";
-      let tokensPath = typeof config.tokens === "string" ? config.tokens : "";
-      const fstPaths = [];
-
-      for (let i = 0; i < normalizedEntries.length; i++) {
-        const entry = normalizedEntries[i];
-        const file = entry.file;
-        const rel = entry.rel;
-        const lower = rel.toLowerCase();
-        const isOnnx = lower.endsWith(".onnx");
-        const targetPath =
-          isOnnx && !modelPath ? "/models/vits/model.onnx" : "/models/vits/" + rel;
-        mountZeroCopy(FS, targetPath, file.buffer);
-        if (isOnnx && !modelPath) {
-          modelPath = targetPath;
-        } else if (baseName(rel) === "lexicon.txt" && !lexiconPath) {
-          lexiconPath = targetPath;
-        } else if (baseName(rel) === "tokens.txt" && !tokensPath) {
-          tokensPath = targetPath;
-        } else if (lower.endsWith(".fst")) {
-          fstPaths.push(targetPath);
-        }
-      }
-
-      if (!modelPath) {
-        modelPath = "/models/vits/model.onnx";
-      }
-      const ruleFsts =
-        typeof config.ruleFsts === "string" ? config.ruleFsts : fstPaths.join(",");
-
-      try {
-        offlineTts = SherpaTts.createOfflineTts(wasmMod, {
-          offlineTtsModelConfig: {
-            offlineTtsVitsModelConfig: {
-              model: modelPath,
-              lexicon: lexiconPath,
-              tokens: tokensPath || "/models/vits/tokens.txt",
-              dataDir: "",
-              noiseScale: Number(config.noiseScale ?? 0.667),
-              noiseScaleW: Number(config.noiseScaleW ?? 0.8),
-              lengthScale: Number(config.lengthScale ?? 1.0),
-            },
-            numThreads: 1,
-            debug: 0,
-            provider: "cpu",
-          },
-          ruleFsts,
-          ruleFars: String(config.ruleFars ?? ""),
-          maxNumSentences: Number(config.maxNumSentences ?? 1),
-        });
-        if (!offlineTts || ("handle" in offlineTts && !offlineTts.handle)) {
-          offlineTts = null;
-          throw makeWorkerError(
-            "model_load_failed",
-            "SherpaTts.createOfflineTts returned null handle",
-          );
-        }
-      } finally {
-        safeUnlink(FS, "/models/vits/model.onnx");
-        if (modelPath !== "/models/vits/model.onnx") {
-          safeUnlink(FS, modelPath);
-        }
-      }
-
-      reply({
-        id: req.id,
-        type: "model:loaded",
-        target: "tts-vits",
-        elapsedMs: Math.max(0, Math.round(nowMs() - t0)),
-      });
-      return;
-    }
-
-    throw makeWorkerError("model_load_failed", "Unsupported model target: " + String(req.target));
-  }
-
-  function handleVadProcess(req) {
-    if (!vad) {
-      throw makeWorkerError("not_initialized", "Silero VAD model is not loaded");
-    }
-    const incoming = new Float32Array(req.pcm);
-    let samples;
-    if (vadCarry.length > 0) {
-      samples = new Float32Array(vadCarry.length + incoming.length);
-      samples.set(vadCarry, 0);
-      samples.set(incoming, vadCarry.length);
-    } else {
-      samples = incoming;
-    }
-
-    let offset = 0;
-    let detectedInChunk = false;
-    let speechEnded = false;
-
-    while (offset + 512 <= samples.length) {
-      const window512 = samples.subarray(offset, offset + 512);
-      vad.acceptWaveform(window512);
-      if (vad.isDetected()) {
-        detectedInChunk = true;
-      }
-      while (!vad.isEmpty()) {
-        vad.pop();
-        speechEnded = true;
-      }
-      offset += 512;
-    }
-
-    vadCarry = offset < samples.length ? samples.slice(offset) : new Float32Array(0);
-    const currentlyDetected = Boolean(vad.isDetected());
-    const isSpeech = currentlyDetected || (detectedInChunk && !speechEnded);
-
-    reply({
-      id: req.id,
-      type: "vad:result",
-      speechProbability: isSpeech ? 1 : 0,
-      isSpeech,
-      speechEnded,
-    });
-  }
-
-  function handleVadReset(req) {
-    vadCarry = new Float32Array(0);
-    if (vad && typeof vad.reset === "function") {
-      vad.reset();
-    }
-    reply({ id: req.id, type: "worker:ack" });
-  }
-
-  function handleAsrTranscribe(req) {
-    if (!offlineAsr) {
-      throw makeWorkerError("not_initialized", "Offline ASR model is not loaded");
-    }
-    const samples = new Float32Array(req.pcm);
-    const sampleRate = Number(req.sampleRate) > 0 ? Number(req.sampleRate) : 16000;
-    const durationMs = samples.length > 0 ? Math.round((samples.length / sampleRate) * 1000) : 0;
-
-    if (samples.length === 0) {
-      reply({ id: req.id, type: "asr:final", text: "", durationMs: 0 });
-      return;
-    }
-
-    const stream = offlineAsr.createStream();
-    try {
-      stream.acceptWaveform(sampleRate, samples);
-      offlineAsr.decode(stream);
-      const res = offlineAsr.getResult(stream) || {};
-      const text = typeof res.text === "string" ? res.text.trim() : "";
-      const out = {
-        id: req.id,
-        type: "asr:final",
-        text,
-        durationMs,
-      };
-      if (typeof res.lang === "string" && res.lang.length > 0) {
-        out.language = res.lang;
-      }
-      reply(out);
-    } finally {
-      if (stream && typeof stream.free === "function") {
-        stream.free();
-      }
-    }
-  }
-
-  function handleTtsSynthesize(req) {
-    if (!offlineTts) {
-      throw makeWorkerError("not_initialized", "Offline TTS model is not loaded");
-    }
-    const text = typeof req.text === "string" ? req.text : "";
-    const generated = offlineTts.generate({
-      text,
-      sid: req.speakerId ?? 0,
-      speed: req.speed ?? 1.0,
-    });
-    const samples =
-      generated && generated.samples instanceof Float32Array
-        ? generated.samples
-        : new Float32Array(0);
-    const sampleRate = Number(generated?.sampleRate || offlineTts.sampleRate || 22050);
-    const wavBuffer = encodeWavPcm16(samples, sampleRate);
-    reply(
-      {
-        id: req.id,
-        type: "tts:result",
-        audio: wavBuffer,
-        sampleRate,
-        channels: 1,
-        mime: "audio/wav",
-      },
-      [wavBuffer],
-    );
-  }
-
-  function handleDispose(req) {
-    freeInstance(offlineAsr);
-    offlineAsr = null;
-    freeInstance(vad);
-    vad = null;
-    freeInstance(offlineTts);
-    offlineTts = null;
-    vadCarry = new Float32Array(0);
-    reply({ id: req.id, type: "worker:ack" });
-  }
-
-  function mapErrorCode(reqType, err) {
-    if (err && typeof err.workerCode === "string") {
-      return err.workerCode;
-    }
-    const msg = err && typeof err.message === "string" ? err.message : String(err);
-    if (
-      (typeof WebAssembly !== "undefined" && err instanceof WebAssembly.RuntimeError) ||
-      /out of memory|oom|cannot enlarge memory|allocation failed/i.test(msg)
-    ) {
-      return "out_of_memory";
-    }
-    switch (reqType) {
-      case "model:load":
-        return "model_load_failed";
-      case "vad:process":
-      case "vad:reset":
-        return "vad_failed";
-      case "asr:transcribe":
-        return "asr_failed";
-      case "tts:synthesize":
-        return "tts_failed";
-      default:
-        return "internal_error";
-    }
-  }
-
-  async function dispatchRequest(req) {
-    if (
-      !req ||
-      typeof req !== "object" ||
-      typeof req.id !== "number" ||
-      !Number.isInteger(req.id) ||
-      req.id < 0 ||
-      typeof req.type !== "string"
-    ) {
-      if (req && typeof req === "object" && typeof req.id === "number") {
-        reply({
-          id: req.id,
-          type: "worker:error",
-          code: "invalid_message",
-          message: "Malformed worker request",
-        });
-      }
-      return;
-    }
-
-    try {
-      switch (req.type) {
-        case "model:load":
-          await handleModelLoad(req);
-          break;
-        case "vad:process":
-          handleVadProcess(req);
-          break;
-        case "vad:reset":
-          handleVadReset(req);
-          break;
-        case "asr:transcribe":
-          handleAsrTranscribe(req);
-          break;
-        case "tts:synthesize":
-          handleTtsSynthesize(req);
-          break;
-        case "worker:cancel":
-          reply({ id: req.id, type: "worker:ack" });
-          break;
-        case "worker:dispose":
-          handleDispose(req);
-          break;
-        default:
-          reply({
-            id: req.id,
-            type: "worker:error",
-            code: "invalid_message",
-            message: "Unsupported worker request type: " + String(req.type),
-          });
-          break;
-      }
-    } catch (err) {
-      const code = mapErrorCode(req.type, err);
-      const message =
-        err && typeof err === "object" && typeof err.message === "string"
-          ? err.message
-          : String(err);
-      reply({
-        id: req.id,
-        type: "worker:error",
-        code,
-        message,
-      });
-    }
-  }
-
-  self.onmessage = function (ev) {
-    const req = ev ? ev.data : undefined;
-    if (req && typeof req === "object" && req.type === "worker:cancel" && Number.isInteger(req.id) && req.id >= 0) {
-      reply({ id: req.id, type: "worker:ack" });
-      return;
-    }
-    opQueue = opQueue.then(() => dispatchRequest(req)).catch(() => undefined);
-  };
-})();
-`.trim();
 
 // node_modules/.pnpm/@voice-mode+browser@file+vendor+voice-mode-browser-0.1.0.tgz/node_modules/@voice-mode/browser/dist/sherpa-worker-client.js
 function scheduleTimer(callback, ms) {
@@ -6418,16 +5826,17 @@ var FocusTextInjector = class {
   }
 };
 
-// src/tts-hub.ts
+// node_modules/.pnpm/@voice-mode+browser@file+vendor+voice-mode-browser-0.1.0.tgz/node_modules/@voice-mode/browser/dist/system-tts-playback.js
 var SYSTEM_TTS_MIME = "application/x-voice-mode-system-tts";
 function abortableDelay(ms, signal) {
-  if (ms <= 0 || signal.aborted) return Promise.resolve();
+  if (ms <= 0 || signal.aborted)
+    return Promise.resolve();
   return new Promise((resolve) => {
     const onAbort = () => {
-      clearTimeout(timer);
+      cancelTimeout(timer);
       resolve();
     };
-    const timer = setTimeout(() => {
+    const timer = scheduleTimeout(() => {
       signal.removeEventListener("abort", onAbort);
       resolve();
     }, ms);
@@ -6440,14 +5849,16 @@ function computeLeadingBreakMs(rawText) {
   const leadRe = /^\s*<\s*break\s+(\d+)\s*ms\s*>/i;
   while (true) {
     const m = leadRe.exec(rest);
-    if (!m) break;
+    if (!m)
+      break;
     sum += Math.min(5e3, Math.max(0, Number(m[1] ?? 0)));
     rest = rest.slice(m[0].length);
   }
   return Math.min(1e4, sum);
 }
 function buildSystemTtsSegments(rawText, segments) {
-  if (segments.length === 0) return [];
+  if (segments.length === 0)
+    return [];
   const leadingBreak = computeLeadingBreakMs(rawText);
   return segments.map((seg, idx) => {
     const attached = Math.max(0, Math.min(5e3, seg.preBreakMs ?? 0));
@@ -6509,7 +5920,8 @@ var BrowserAudioSink = class {
   activeObjectUrl = null;
   audioPlaying = false;
   async play(payload, signal) {
-    if (signal.aborted) return;
+    if (signal.aborted)
+      return;
     if (payload.mime === SYSTEM_TTS_MIME) {
       await this.playSystemUtterance(payload.audio, signal);
       return;
@@ -6560,7 +5972,8 @@ var BrowserAudioSink = class {
     }
   }
   async speakSingleSystemSegment(text, voiceName, rate, whisper, signal) {
-    if (signal.aborted || !text.trim()) return;
+    if (signal.aborted || !text.trim())
+      return;
     const synth = typeof window !== "undefined" && "speechSynthesis" in window ? window.speechSynthesis : null;
     const UtteranceCtor = typeof SpeechSynthesisUtterance !== "undefined" ? SpeechSynthesisUtterance : null;
     const voices = synth ? synth.getVoices() : [];
@@ -6572,9 +5985,10 @@ var BrowserAudioSink = class {
     await new Promise((resolve) => {
       let settled = false;
       const finish = () => {
-        if (settled) return;
+        if (settled)
+          return;
         settled = true;
-        clearTimeout(safetyTimer);
+        cancelTimeout(safetyTimer);
         signal.removeEventListener("abort", onAbort);
         resolve();
       };
@@ -6587,17 +6001,16 @@ var BrowserAudioSink = class {
       };
       const utterance = new UtteranceCtor(text);
       if (voiceName) {
-        const matched = voices.find(
-          (v) => v.name === voiceName || v.voiceURI === voiceName || v.lang === voiceName
-        );
-        if (matched) utterance.voice = matched;
+        const matched = voices.find((v) => v.name === voiceName || v.voiceURI === voiceName || v.lang === voiceName);
+        if (matched)
+          utterance.voice = matched;
       }
       utterance.rate = rate || 1;
       utterance.volume = whisper ? 0.65 : 1;
       utterance.onend = finish;
       utterance.onerror = finish;
       const maxExpectedMs = Math.min(2e4, Math.max(2500, text.length * 120));
-      const safetyTimer = setTimeout(finish, maxExpectedMs);
+      const safetyTimer = scheduleTimeout(finish, maxExpectedMs);
       signal.addEventListener("abort", onAbort, { once: true });
       try {
         synth.cancel();
@@ -6608,24 +6021,19 @@ var BrowserAudioSink = class {
     });
   }
   async playSystemUtterance(encoded, signal) {
-    const parsed = JSON.parse(
-      new TextDecoder().decode(encoded)
-    );
+    const parsed = JSON.parse(new TextDecoder().decode(encoded));
     const segs = Array.isArray(parsed.segments) && parsed.segments.length > 0 ? parsed.segments : [{ text: parsed.text, whisper: false, preBreakMs: 0, breakAfterMs: 0 }];
     for (const seg of segs) {
-      if (signal.aborted) return;
+      if (signal.aborted)
+        return;
       if (seg.preBreakMs > 0) {
         await abortableDelay(seg.preBreakMs, signal);
       }
-      if (signal.aborted) return;
-      await this.speakSingleSystemSegment(
-        seg.text,
-        parsed.voice,
-        parsed.rate,
-        seg.whisper,
-        signal
-      );
-      if (signal.aborted) return;
+      if (signal.aborted)
+        return;
+      await this.speakSingleSystemSegment(seg.text, parsed.voice, parsed.rate, seg.whisper, signal);
+      if (signal.aborted)
+        return;
       if (seg.breakAfterMs > 0) {
         await abortableDelay(seg.breakAfterMs, signal);
       }
@@ -6648,7 +6056,8 @@ var BrowserAudioSink = class {
     await new Promise((resolve) => {
       let settled = false;
       const finish = () => {
-        if (settled) return;
+        if (settled)
+          return;
         settled = true;
         signal.removeEventListener("abort", onAbort);
         this.resetSharedAudio();
@@ -6664,6 +6073,8 @@ var BrowserAudioSink = class {
     });
   }
 };
+
+// src/tts-hub.ts
 function resolveUtteranceVoice(utterance, settings, cardVoiceRaw) {
   if (utterance.role === "narrator" && settings.narrationSplitEnabled) {
     const narrator = settings.narratorVoice;
