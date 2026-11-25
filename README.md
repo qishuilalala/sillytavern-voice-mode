@@ -27,6 +27,18 @@ Browser speech synthesis uses the chosen system voice. Browser dictation may sen
 
 For cloud speech, select an OpenAI-compatible engine or MiMo for playback, or OpenAI-compatible Whisper for dictation. Check the endpoint and save the matching key with **Save Server Secret**. The speech provider receives speakable text or utterance audio. See the [data flow details](./SECURITY.md).
 
+## Capability tiers
+
+The extension works immediately with zero configuration, but the advertised features deepen with the backend you choose:
+
+| Tier | Setup | What you get | Limits |
+| --- | --- | --- | --- |
+| **Zero-config** | Install the extension only | Browser system TTS reads replies; browser `SpeechRecognition` dictates into `#send_textarea`; manual barge-in (`Alt+Shift+B`). | System voices only (no per-character timbre variation); emotion tags are stripped before speaking; hands-free AEC3 barge-in stays manual. |
+| **Advanced · local daemon** | Run [Voice Mode Daemon](https://github.com/qishuilalala/voice-mode-daemon) from source (developer-only backend) | 103 Kokoro voices, `<whisper>`/`<break Nms>` emotion prosody, local `Zipformer2`/`SenseVoice` dictation, hands-free AEC3 barge-in. | Requires Node.js + pnpm build + model download; the daemon is not distributed as a store package. |
+| **Advanced · BYOK cloud** | Configure an OpenAI-compatible or MiMo endpoint and save the key | Cloud TTS/ASR quality without local model downloads. | Needs an API key; speakable text or utterance audio leaves the machine to the chosen provider. |
+
+Emotion tags are only audible on engines that support them; on the `system` engine they are stripped from the speech rather than read aloud.
+
 ## Highlights
 
 - **Mid-Stream First-Sentence Playback**: Converts SillyTavern's cumulative `STREAM_TOKEN_RECEIVED` stream into incremental deltas and feeds `@voice-mode/core`'s `SentenceSegmenter` so the first sentence speaks while tokens are still generating (`GENERATION_ENDED` flushes the tail; `CHARACTER_MESSAGE_RENDERED` covers non-streaming backends).
