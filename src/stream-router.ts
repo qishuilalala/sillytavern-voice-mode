@@ -76,6 +76,10 @@ export class StreamingUtteranceRouter {
   private ignoredTurn = false;
   private streamSawTokens = false;
   private handledLastGenerationByStream = false;
+  // Set when a generation is interrupted: the host may still render the truncated
+  // message, and re-ingesting it would replay cancelled text. Deliberately not
+  // cleared by reset(); cleared by the next onGenerationStarted/onChatChanged.
+  private suppressNextRendered = false;
   private prevCumulativeText = "";
   private activeSpeaker = "";
   private activeAvatar: string | undefined = undefined;
@@ -96,6 +100,7 @@ export class StreamingUtteranceRouter {
   }
 
   onGenerationStarted(input: GenerationStartInput = {}): void {
+    this.suppressNextRendered = false;
     const type = input.type ?? "normal";
     if (input.dryRun === true || type === "quiet" || type === "impersonate") {
       this.reset();
@@ -152,13 +157,19 @@ export class StreamingUtteranceRouter {
 
   onGenerationStopped(): void {
     this.reset();
+    this.suppressNextRendered = true;
   }
 
   onChatChanged(): void {
     this.reset();
+    this.suppressNextRendered = false;
   }
 
   onCharacterMessageRendered(input: RenderedMessageInput): RoutedUtterance[] {
+    if (this.suppressNextRendered) {
+      this.suppressNextRendered = false;
+      return [];
+    }
     if (input.type === "impersonate" || input.type === "quiet") {
       return [];
     }

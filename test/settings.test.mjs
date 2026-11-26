@@ -111,3 +111,39 @@ test("inspectSecureOrigin detects non-secure LAN HTTP and formatSafeError redact
   );
   assert.doesNotMatch(safeMsg, /sk-secret-abcdef1234567890/);
 });
+
+test("SillyTavernSecretBroker re-probes an indeterminate canViewSecrets instead of caching null", async () => {
+  const serverVault = new Map();
+  let probes = 0;
+  let allowView = false;
+  const host = {
+    writeSecret: async (key, value) => {
+      serverVault.set(key, value);
+      return "id-1";
+    },
+    findSecret: async (key) => (allowView ? (serverVault.get(key) ?? null) : null),
+    deleteSecret: async (key) => {
+      serverVault.delete(key);
+    },
+    canViewSecrets: async () => {
+      probes++;
+      return allowView ? true : null;
+    },
+  };
+
+  const writer = new SillyTavernSecretBroker(host);
+  await writer.setSecret("openaiTts", "sk-live-secret-value-1234567890");
+
+  // Simulate a page reload: fresh broker, no ephemeral cache, backend still warming up.
+  const reloaded = new SillyTavernSecretBroker(host);
+  assert.equal(await reloaded.getSecret("openaiTts"), null);
+
+  // Once the backend reports a definitive answer, the key must become readable.
+  allowView = true;
+  assert.equal(
+    await reloaded.getSecret("openaiTts"),
+    "sk-live-secret-value-1234567890",
+    "indeterminate probe must be retried, not cached as cannot-view",
+  );
+  assert.ok(probes >= 2, `canViewSecrets should be re-probed, got ${probes}`);
+});

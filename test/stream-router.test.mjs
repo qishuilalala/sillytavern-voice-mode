@@ -157,3 +157,35 @@ test("a leading Markdown rule streams complete dialogue before the turn ends", (
   ];
   assert.deepEqual(rest.map((utterance) => utterance.text), ["第三句。"]);
 });
+
+test("StreamingUtteranceRouter suppresses the post-interrupt rendered message (no repeat playback)", () => {
+  const emitted = [];
+  const router = new StreamingUtteranceRouter({
+    narrationSplitEnabled: false,
+    onUtterance: (u) => emitted.push(u),
+  });
+
+  router.onGenerationStarted({ type: "normal", speaker: "Seraphina", avatar: "seraphina.png" });
+  router.onStreamToken("*The rain tapped against the window. ");
+  assert.equal(emitted.length, 1);
+
+  // User interrupts; ST may still render the truncated message afterwards.
+  router.onGenerationStopped();
+  const afterStop = router.onCharacterMessageRendered({
+    messageId: 1,
+    type: "normal",
+    message: {
+      name: "Seraphina",
+      original_avatar: "seraphina.png",
+      is_user: false,
+      mes: "*The rain tapped against the window. She stepped closer.*",
+    },
+  });
+  assert.deepEqual(afterStop, [], "truncated message must not be re-queued after interrupt");
+  assert.equal(emitted.length, 1, "cancelled text must not be re-played");
+
+  // The next generation must not stay suppressed.
+  router.onGenerationStarted({ type: "normal", speaker: "Seraphina" });
+  router.onStreamToken("Fresh sentence. ");
+  assert.equal(emitted.length, 2);
+});

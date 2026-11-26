@@ -262,6 +262,8 @@ export class SillyTavernSecretBroker {
     );
     if (id === null) throw new Error("SillyTavern did not save the secret.");
     this.ephemeral.set(slot, trimmed);
+    // Permission state may have changed while saving; re-probe on next read.
+    this.canViewCached = undefined;
   }
 
   async getSecret(slot: SecretSlot): Promise<string | null> {
@@ -273,9 +275,15 @@ export class SillyTavernSecretBroker {
     }
     if (this.host.canViewSecrets) {
       if (this.canViewCached === undefined) {
-        this.canViewCached = await this.host.canViewSecrets();
+        const view = await this.host.canViewSecrets();
+        // Only cache a definitive answer. A null/unknown probe (ST returns it while
+        // the secrets backend is still warming up) must be retried on the next read,
+        // otherwise a reload would permanently hide a key that is actually there.
+        if (view === true || view === false) {
+          this.canViewCached = view;
+        }
       }
-      if (this.canViewCached !== true) {
+      if (this.canViewCached === false) {
         return null;
       }
     }

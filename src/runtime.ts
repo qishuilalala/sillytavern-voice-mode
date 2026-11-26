@@ -155,10 +155,32 @@ export function createVoiceModeRuntime(host: SillyTavernHostBridge): VoiceModeRu
         typeof ctx.characterId === "number"
           ? ctx.characters[ctx.characterId]
           : undefined;
-      return {
-        speaker: ch?.name || ctx.name2 || "",
-        avatar: ch?.avatar,
-      };
+      if (ch) {
+        return {
+          speaker: ch.name || ctx.name2 || "",
+          avatar: ch.avatar,
+        };
+      }
+      // Group chats leave characterId unset. ST fills name/original_avatar on the
+      // message being generated before streaming, so resolve the speaking member
+      // there instead of falling back to the group name (which breaks Voice Map).
+      if (typeof ctx.groupId === "string" && ctx.groupId.length > 0) {
+        const chat = Array.isArray(ctx.chat) ? ctx.chat : [];
+        const last = chat[chat.length - 1];
+        if (last && !last.is_user && !last.is_system) {
+          const name = typeof last.name === "string" ? last.name : "";
+          const avatar =
+            typeof last.original_avatar === "string" ? last.original_avatar : undefined;
+          const matched = name
+            ? ctx.characters.find((c) => c.name === name)
+            : undefined;
+          return {
+            speaker: matched?.name ?? name ?? ctx.name2 ?? "",
+            avatar: avatar ?? matched?.avatar,
+          };
+        }
+      }
+      return { speaker: ctx.name2 || "" };
     } catch {
       return { speaker: "" };
     }

@@ -477,3 +477,98 @@ test("Settings drawer reports a rejected secret write in the selected locale", a
     await runtime.dispose();
   }
 });
+
+test("VoiceModeRuntime resolves the group-chat speaker from the generated message so Voice Map matches", async () => {
+  const eventSource = createFakeEventSource();
+  const extensionSettings = {
+    voice_mode: {
+      enabled: true,
+      emotionPromptEnabled: false,
+      narrationSplitEnabled: false,
+      bargeInMode: "manual",
+      defaultVoice: { engine: "system", voice: "DefaultVoice" },
+      narratorVoice: { engine: "system", voice: "NarratorVoice" },
+      voiceMap: { "seraphina.png": { engine: "system", voice: "SeraphinaVoice" } },
+    },
+  };
+  let generating = false;
+
+  const runtime = createVoiceModeRuntime({
+    eventSource,
+    eventTypes: {
+      APP_INITIALIZED: "app_initialized",
+      APP_READY: "app_ready",
+      CHAT_CHANGED: "chat_id_changed",
+      GENERATION_STARTED: "generation_started",
+      GENERATION_STOPPED: "generation_stopped",
+      GENERATION_ENDED: "generation_ended",
+      STREAM_TOKEN_RECEIVED: "stream_token_received",
+      CHARACTER_MESSAGE_RENDERED: "character_message_rendered",
+      USER_MESSAGE_RENDERED: "user_message_rendered",
+      MESSAGE_SWIPED: "message_swiped",
+      MESSAGE_DELETED: "message_deleted",
+      GROUP_UPDATED: "group_updated",
+      SECRET_WRITTEN: "secret_written",
+      SECRET_DELETED: "secret_deleted",
+      SECRET_ROTATED: "secret_rotated",
+    },
+    extensionPromptTypes: { NONE: -1, IN_PROMPT: 0, IN_CHAT: 1, BEFORE_PROMPT: 2 },
+    extensionPromptRoles: { SYSTEM: 0, USER: 1, ASSISTANT: 2 },
+    extensionSettings,
+    getContext: () => ({
+      // Group chat: characterId is unset; the generated message carries the speaker.
+      chat: [
+        {
+          name: "Seraphina",
+          original_avatar: "seraphina.png",
+          is_user: false,
+          is_system: false,
+          mes: "",
+        },
+      ],
+      characters: [{ name: "Seraphina", avatar: "seraphina.png" }],
+      groups: [{ id: "g1", name: "Group Chat", members: ["Seraphina"] }],
+      name1: "User",
+      name2: "Group Chat",
+      characterId: undefined,
+      groupId: "g1",
+      chatId: "chat-g1",
+      streamingProcessor: generating ? { isFinished: false, isStopped: false } : null,
+    }),
+    saveSettingsDebounced: () => undefined,
+    isGenerating: () => generating,
+    stopGeneration: () => {
+      generating = false;
+      return true;
+    },
+    setExtensionPrompt: () => undefined,
+    getRequestHeaders: () => ({ "Content-Type": "application/json" }),
+    secrets: {
+      writeSecret: async () => "sec-1",
+      findSecret: async () => null,
+      deleteSecret: async () => undefined,
+    },
+    sink: {
+      async play() {
+        await new Promise((resolve) => setTimeout(resolve, 10));
+      },
+    },
+  });
+
+  await runtime.activate();
+  generating = true;
+  await eventSource.emit("generation_started", "normal", {}, false);
+  await eventSource.emit("stream_token_received", "Group reply from Seraphina. ");
+  await new Promise((r) => setTimeout(r, 80));
+  await runtime.waitUntilIdle();
+
+  const diag = runtime.getDiagnostics();
+  assert.ok(diag.utteranceHistory.length >= 1, "expected at least one utterance");
+  assert.equal(
+    diag.utteranceHistory[0].voice,
+    "SeraphinaVoice",
+    `group speaker must map to the character voice, got ${diag.utteranceHistory[0].voice}`,
+  );
+
+  await runtime.dispose();
+});

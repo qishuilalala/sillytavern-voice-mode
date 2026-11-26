@@ -3110,6 +3110,7 @@ var SillyTavernSecretBroker = class {
     );
     if (id === null) throw new Error("SillyTavern did not save the secret.");
     this.ephemeral.set(slot, trimmed);
+    this.canViewCached = void 0;
   }
   async getSecret(slot) {
     const mem = this.ephemeral.get(slot);
@@ -3120,9 +3121,12 @@ var SillyTavernSecretBroker = class {
     }
     if (this.host.canViewSecrets) {
       if (this.canViewCached === void 0) {
-        this.canViewCached = await this.host.canViewSecrets();
+        const view = await this.host.canViewSecrets();
+        if (view === true || view === false) {
+          this.canViewCached = view;
+        }
       }
-      if (this.canViewCached !== true) {
+      if (this.canViewCached === false) {
         return null;
       }
     }
@@ -3207,6 +3211,10 @@ var StreamingUtteranceRouter = class {
   ignoredTurn = false;
   streamSawTokens = false;
   handledLastGenerationByStream = false;
+  // Set when a generation is interrupted: the host may still render the truncated
+  // message, and re-ingesting it would replay cancelled text. Deliberately not
+  // cleared by reset(); cleared by the next onGenerationStarted/onChatChanged.
+  suppressNextRendered = false;
   prevCumulativeText = "";
   activeSpeaker = "";
   activeAvatar = void 0;
@@ -3224,6 +3232,7 @@ var StreamingUtteranceRouter = class {
     this.narrationSplitEnabled = enabled;
   }
   onGenerationStarted(input = {}) {
+    this.suppressNextRendered = false;
     const type = input.type ?? "normal";
     if (input.dryRun === true || type === "quiet" || type === "impersonate") {
       this.reset();
@@ -3275,11 +3284,17 @@ var StreamingUtteranceRouter = class {
   }
   onGenerationStopped() {
     this.reset();
+    this.suppressNextRendered = true;
   }
   onChatChanged() {
     this.reset();
+    this.suppressNextRendered = false;
   }
   onCharacterMessageRendered(input) {
+    if (this.suppressNextRendered) {
+      this.suppressNextRendered = false;
+      return [];
+    }
     if (input.type === "impersonate" || input.type === "quiet") {
       return [];
     }
@@ -7030,10 +7045,26 @@ function createVoiceModeRuntime(host) {
     try {
       const ctx = host.getContext();
       const ch = typeof ctx.characterId === "number" ? ctx.characters[ctx.characterId] : void 0;
-      return {
-        speaker: ch?.name || ctx.name2 || "",
-        avatar: ch?.avatar
-      };
+      if (ch) {
+        return {
+          speaker: ch.name || ctx.name2 || "",
+          avatar: ch.avatar
+        };
+      }
+      if (typeof ctx.groupId === "string" && ctx.groupId.length > 0) {
+        const chat = Array.isArray(ctx.chat) ? ctx.chat : [];
+        const last = chat[chat.length - 1];
+        if (last && !last.is_user && !last.is_system) {
+          const name = typeof last.name === "string" ? last.name : "";
+          const avatar = typeof last.original_avatar === "string" ? last.original_avatar : void 0;
+          const matched = name ? ctx.characters.find((c) => c.name === name) : void 0;
+          return {
+            speaker: matched?.name ?? name ?? ctx.name2 ?? "",
+            avatar: avatar ?? matched?.avatar
+          };
+        }
+      }
+      return { speaker: ctx.name2 || "" };
     } catch {
       return { speaker: "" };
     }
