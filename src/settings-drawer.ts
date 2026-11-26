@@ -383,14 +383,6 @@ export function buildSettingsDrawer(
   bargeBtn.id = "vm_st_barge_in_btn";
   bargeBtn.addEventListener("click", options.triggerBargeIn);
 
-  const exportBtn = makeEl(
-    doc,
-    "button",
-    "menu_button",
-    text("export_wav", "Export last reply as WAV"),
-  ) as HTMLButtonElement;
-  exportBtn.type = "button";
-  exportBtn.id = "vm_st_export_wav_btn";
   let exportInProgress = false;
   const runExport = (
     start: () => Promise<{
@@ -439,18 +431,34 @@ export function buildSettingsDrawer(
       }
     })();
   };
-  exportBtn.addEventListener("click", () => runExport(options.exportLastReplyAsWav, "voice-mode"));
-
-  const exportChatBtn = makeEl(
-    doc,
-    "button",
-    "menu_button",
+  const makeExportButton = (
+    id: string,
+    label: string,
+    action: () => Promise<{
+      sentences: number;
+      skipped: number;
+      reason?: "no-wav-engine" | "empty";
+      wav: Uint8Array | null;
+    }>,
+    fileName: string,
+  ): HTMLButtonElement => {
+    const btn = makeEl(doc, "button", "menu_button", label) as HTMLButtonElement;
+    btn.type = "button";
+    btn.id = id;
+    btn.addEventListener("click", () => runExport(action, fileName));
+    return btn;
+  };
+  const exportBtn = makeExportButton(
+    "vm_st_export_wav_btn",
+    text("export_wav", "Export last reply as WAV"),
+    options.exportLastReplyAsWav,
+    "voice-mode",
+  );
+  const exportChatBtn = makeExportButton(
+    "vm_st_export_chat_btn",
     text("export_chat", "Export last 10 replies as WAV"),
-  ) as HTMLButtonElement;
-  exportChatBtn.type = "button";
-  exportChatBtn.id = "vm_st_export_chat_btn";
-  exportChatBtn.addEventListener("click", () =>
-    runExport(options.exportRecentRepliesAsWav, "voice-mode-chat"),
+    options.exportRecentRepliesAsWav,
+    "voice-mode-chat",
   );
 
   const diagBtn = makeEl(
