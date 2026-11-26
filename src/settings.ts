@@ -46,6 +46,8 @@ export interface VoiceModeExtensionSettings {
   asrBaseUrl: string;
   asrModel: string;
   asrReplacements: AsrReplacement[];
+  /** Stop dictation early when interim text looks like a complete sentence (partial hosts only). */
+  semanticEndpoint: boolean;
 }
 
 export const DEFAULT_VOICE_ASSIGNMENT: Readonly<VoiceAssignment> = Object.freeze({
@@ -72,6 +74,7 @@ export const DEFAULT_SETTINGS: Readonly<VoiceModeExtensionSettings> =
   daemonBaseUrl: DEFAULT_DAEMON_BASE_URL,
   asrEngine: "system",
   asrLanguage: "auto",
+  semanticEndpoint: false,
   asrBaseUrl: DEFAULT_ASR_OPENAI_BASE_URL,
   asrModel: DEFAULT_ASR_OPENAI_MODEL,
   asrReplacements: [],
@@ -185,6 +188,10 @@ export function ensureExtensionSettings(
       typeof src.autoSendOnDictation === "boolean"
         ? src.autoSendOnDictation
         : DEFAULT_SETTINGS.autoSendOnDictation,
+    semanticEndpoint:
+      typeof src.semanticEndpoint === "boolean"
+        ? src.semanticEndpoint
+        : DEFAULT_SETTINGS.semanticEndpoint,
     useServerPluginProxy:
       typeof src.useServerPluginProxy === "boolean"
         ? src.useServerPluginProxy

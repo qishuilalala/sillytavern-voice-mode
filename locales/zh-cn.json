@@ -57,5 +57,6 @@
   "voice_mode.tts_mimo": "小米 MiMo 朗读",
   "voice_mode.tts_openai": "OpenAI 兼容朗读（自备密钥）",
   "voice_mode.tts_system": "浏览器系统语音（无需配置）",
-  "voice_mode.voice_id": "音色 ID（例如 zf_001、alloy 或 default）"
+  "voice_mode.voice_id": "音色 ID（例如 zf_001、alloy 或 default）",
+  "voice_mode.semantic_endpoint": "浏览器识别时，句子说完即停止听写（语义端点）"
 }

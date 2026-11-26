@@ -138,3 +138,26 @@ test("disposing during microphone startup prevents a queued start from reopening
   assert.equal(recognizers.length, 0);
   assert.equal(events.includes("listening"), false);
 });
+
+test("semantic endpoint stops dictation early when interim text is a complete sentence (D-0023 A)", async (t) => {
+  const { io, settings, recognizers, input } = webSpeech();
+  t.after(() => io.dispose());
+  settings.semanticEndpoint = true;
+  assert.equal(await io.startDictation(), true);
+  const rec = recognizers[0];
+  let stopped = 0;
+  rec.stop = () => {
+    stopped += 1;
+  };
+  // Interim that is not yet a complete sentence must not stop.
+  rec.onresult({ results: [{ isFinal: false, 0: { transcript: "今天天气" } }] });
+  assert.equal(stopped, 0, "incomplete interim must not stop early");
+  // Complete sentence with terminal punctuation stops early.
+  rec.onresult({ results: [{ isFinal: false, 0: { transcript: "今天天气很好。" } }] });
+  assert.equal(stopped, 1, "complete sentence must stop dictation early");
+  // The browser's final transcript is injected exactly once.
+  rec.onresult({ results: [{ isFinal: true, 0: { transcript: "今天天气很好。" } }] });
+  assert.match(input.value, /今天天气很好/);
+  rec.onend();
+  assert.equal(io.activeDictationState, "idle");
+});

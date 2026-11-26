@@ -107,6 +107,12 @@ export function buildSettingsDrawer(
     (v) => updateSettings((d) => void (d.autoSendOnDictation = v)),
   );
   addCheckbox(
+    "vm_st_semantic_endpoint",
+    text("semantic_endpoint", "Stop Dictation When the Sentence Is Complete (Browser ASR)"),
+    settings.semanticEndpoint,
+    (v) => updateSettings((d) => void (d.semanticEndpoint = v)),
+  );
+  addCheckbox(
     "vm_st_use_server_proxy",
     text("server_proxy", "Route Cloud TTS via Optional Server Plugin Proxy (/api/plugins/voice-mode)"),
     settings.useServerPluginProxy,

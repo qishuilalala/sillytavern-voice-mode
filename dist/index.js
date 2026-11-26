@@ -3102,6 +3102,7 @@ var DEFAULT_SETTINGS = Object.freeze({
   daemonBaseUrl: DEFAULT_DAEMON_BASE_URL,
   asrEngine: "system",
   asrLanguage: "auto",
+  semanticEndpoint: false,
   asrBaseUrl: DEFAULT_ASR_OPENAI_BASE_URL,
   asrModel: DEFAULT_ASR_OPENAI_MODEL,
   asrReplacements: []
@@ -3179,6 +3180,7 @@ function ensureExtensionSettings(store) {
     narrationSplitEnabled: typeof src.narrationSplitEnabled === "boolean" ? src.narrationSplitEnabled : DEFAULT_SETTINGS.narrationSplitEnabled,
     bargeInMode: VALID_BARGE_IN_MODES.has(src.bargeInMode) ? src.bargeInMode : DEFAULT_SETTINGS.bargeInMode,
     autoSendOnDictation: typeof src.autoSendOnDictation === "boolean" ? src.autoSendOnDictation : DEFAULT_SETTINGS.autoSendOnDictation,
+    semanticEndpoint: typeof src.semanticEndpoint === "boolean" ? src.semanticEndpoint : DEFAULT_SETTINGS.semanticEndpoint,
     useServerPluginProxy: typeof src.useServerPluginProxy === "boolean" ? src.useServerPluginProxy : DEFAULT_SETTINGS.useServerPluginProxy,
     defaultVoice,
     narratorVoice,
@@ -6620,6 +6622,11 @@ var VoiceModeTtsHub = class {
 };
 
 // src/voice-io.ts
+var SEMANTIC_END_RE = /[。！？!?.…]\s*$/;
+function isSemanticEndpoint(text) {
+  const trimmed = String(text).trim();
+  return trimmed.length >= 4 && SEMANTIC_END_RE.test(trimmed);
+}
 var ENERGY_VAD_CONFIRM_CHUNKS = 5;
 function computeZeroCrossingRate(samples) {
   if (samples.length < 2) return 0;
@@ -6913,17 +6920,34 @@ var VoiceModeIoController = class {
       rec.lang = settings.asrLanguage;
     }
     rec.continuous = false;
-    rec.interimResults = false;
+    rec.interimResults = settings.semanticEndpoint;
     rec.onresult = (ev) => {
       if (generation !== this.dictationGeneration) return;
-      const parts = [];
+      const finals = [];
+      let interim = "";
       for (let i = 0; i < ev.results.length; i++) {
         const res = ev.results[i];
-        const top = res?.[0];
-        if (top?.transcript) parts.push(top.transcript);
+        if (!res) continue;
+        const top = res[0];
+        const transcript = top?.transcript ?? "";
+        if (!transcript) continue;
+        if (res.isFinal !== false) {
+          finals.push(transcript);
+        } else {
+          interim += transcript;
+        }
       }
-      const joined = parts.join(" ").trim();
-      if (joined) this.injectDictatedText(joined);
+      const finalText = finals.join(" ").trim();
+      if (finalText) {
+        this.injectDictatedText(finalText);
+        return;
+      }
+      if (settings.semanticEndpoint && interim && isSemanticEndpoint(interim)) {
+        try {
+          rec.stop();
+        } catch {
+        }
+      }
     };
     const finish = (error) => {
       if (generation !== this.dictationGeneration) return;
@@ -7019,6 +7043,12 @@ function buildSettingsDrawer(doc, hostContainer, options) {
     text("auto_send", "Auto-Send Message After Voice Dictation"),
     settings.autoSendOnDictation,
     (v) => updateSettings((d) => void (d.autoSendOnDictation = v))
+  );
+  addCheckbox(
+    "vm_st_semantic_endpoint",
+    text("semantic_endpoint", "Stop Dictation When the Sentence Is Complete (Browser ASR)"),
+    settings.semanticEndpoint,
+    (v) => updateSettings((d) => void (d.semanticEndpoint = v))
   );
   addCheckbox(
     "vm_st_use_server_proxy",

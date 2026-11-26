@@ -29,6 +29,15 @@ import {
   type WindowOriginLike,
 } from "./settings.ts";
 
+/** Sentence-final markers for semantic endpointing on interim transcripts. */
+const SEMANTIC_END_RE = /[。！？!?.…]\s*$/;
+
+/** Whether interim text looks complete enough to end dictation early (D-0023 A, partial hosts). */
+export function isSemanticEndpoint(text: string): boolean {
+  const trimmed = String(text).trim();
+  return trimmed.length >= 4 && SEMANTIC_END_RE.test(trimmed);
+}
+
 /** Minimum sustained speech chunks for non-WASM energy+spectral VAD (`5 * 64 ms = 320 ms < 600 ms`). */
 export const ENERGY_VAD_CONFIRM_CHUNKS = 5;
 
@@ -413,18 +422,38 @@ export class VoiceModeIoController {
       rec.lang = settings.asrLanguage;
     }
     rec.continuous = false;
-    rec.interimResults = false;
+    // Interim results are only needed for semantic endpointing on partial hosts.
+    rec.interimResults = settings.semanticEndpoint;
     rec.onresult = (ev) => {
       // stop() may still deliver a final transcript before end; replacing the session revokes it.
       if (generation !== this.dictationGeneration) return;
-      const parts: string[] = [];
+      const finals: string[] = [];
+      let interim = "";
       for (let i = 0; i < ev.results.length; i++) {
         const res = ev.results[i];
-        const top = res?.[0];
-        if (top?.transcript) parts.push(top.transcript);
+        if (!res) continue;
+        const top = res[0];
+        const transcript = top?.transcript ?? "";
+        if (!transcript) continue;
+        if (res.isFinal !== false) {
+          finals.push(transcript);
+        } else {
+          interim += transcript;
+        }
       }
-      const joined = parts.join(" ").trim();
-      if (joined) this.injectDictatedText(joined);
+      const finalText = finals.join(" ").trim();
+      if (finalText) {
+        this.injectDictatedText(finalText);
+        return;
+      }
+      if (settings.semanticEndpoint && interim && isSemanticEndpoint(interim)) {
+        // The browser delivers the final transcript after stop(); inject once there.
+        try {
+          rec.stop();
+        } catch {
+          // ignore stop errors
+        }
+      }
     };
     const finish = (error?: unknown): void => {
       if (generation !== this.dictationGeneration) return;
