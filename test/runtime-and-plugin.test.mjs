@@ -700,3 +700,21 @@ test("Export chat end-to-end through a mocked daemon reports the exported senten
     await runtime.dispose();
   }
 });
+
+test("Diagnostics snapshot reflects activation and secure origin state", async () => {
+  const { runtime } = createDrawerFixture({
+    translate: (fallback, key) => chineseCatalog[key] || fallback,
+  });
+  try {
+    await runtime.activate();
+    const diag = runtime.getDiagnostics();
+    assert.equal(diag.activated, true);
+    // checkSecureOrigin returns { secure, originLabel, remediation }.
+    assert.equal(diag.secureOrigin.secure, true);
+    assert.equal(diag.totalBargeIns, 0);
+    assert.deepEqual(diag.utteranceHistory, []);
+    assert.equal(typeof diag.firstSentenceLeadMs, "number");
+  } finally {
+    await runtime.dispose();
+  }
+});
