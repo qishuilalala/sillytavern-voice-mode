@@ -2157,6 +2157,41 @@ function decodeMonoPcm16Wav(input) {
   }
   return { samples, sampleRate };
 }
+function mergeMonoPcm16WavChunks(chunks) {
+  const decodedChunks = [];
+  let sampleRate = 0;
+  let skipped = 0;
+  for (const chunk of chunks) {
+    const decoded = decodeMonoPcm16Wav(chunk);
+    if (!decoded) {
+      skipped += 1;
+      continue;
+    }
+    if (sampleRate === 0) {
+      sampleRate = decoded.sampleRate;
+    }
+    if (decoded.sampleRate !== sampleRate) {
+      skipped += 1;
+      continue;
+    }
+    decodedChunks.push(decoded.samples);
+  }
+  if (decodedChunks.length === 0)
+    return null;
+  const totalSamples = decodedChunks.reduce((sum, samples) => sum + samples.length, 0);
+  const merged = new Float32Array(totalSamples);
+  let offset = 0;
+  for (const samples of decodedChunks) {
+    merged.set(samples, offset);
+    offset += samples.length;
+  }
+  return {
+    wav: encodeMonoPcm16Wav(merged, sampleRate),
+    sampleRate,
+    merged: decodedChunks.length,
+    skipped
+  };
+}
 function encodeMonoPcm16Wav(samples, sampleRate = DEFAULT_SAMPLE_RATE) {
   const rate = typeof sampleRate === "number" && Number.isFinite(sampleRate) && sampleRate > 0 ? Math.round(sampleRate) : DEFAULT_SAMPLE_RATE;
   const numSamples = samples.length;
@@ -6456,8 +6491,7 @@ var VoiceModeTtsHub = class {
    * Non-WAV engines (system text / MP3 providers) are skipped and reported.
    */
   async exportUtterances(utterances) {
-    const chunks = [];
-    let sampleRate = 0;
+    const wavChunks = [];
     let skipped = 0;
     const exportedKeys = [];
     for (const utterance of utterances) {
@@ -6480,44 +6514,26 @@ var VoiceModeTtsHub = class {
         skipped += 1;
         continue;
       }
-      const decoded = decodeMonoPcm16Wav(result.audio);
-      if (!decoded) {
-        skipped += 1;
-        continue;
-      }
-      if (sampleRate === 0) {
-        sampleRate = decoded.sampleRate;
-      }
-      if (decoded.sampleRate !== sampleRate) {
-        skipped += 1;
-        continue;
-      }
-      chunks.push(decoded.samples);
+      wavChunks.push(result.audio);
     }
     for (const key of exportedKeys) {
       this.pendingInfo.delete(key);
     }
-    if (chunks.length === 0) {
+    const merged = mergeMonoPcm16WavChunks(wavChunks);
+    if (!merged) {
       return {
         wav: null,
-        sampleRate,
+        sampleRate: 0,
         sentences: 0,
-        skipped,
-        reason: skipped > 0 ? "no-wav-engine" : "empty"
+        skipped: skipped + wavChunks.length,
+        reason: "no-wav-engine"
       };
     }
-    const totalSamples = chunks.reduce((sum, chunk) => sum + chunk.length, 0);
-    const merged = new Float32Array(totalSamples);
-    let offset = 0;
-    for (const chunk of chunks) {
-      merged.set(chunk, offset);
-      offset += chunk.length;
-    }
     return {
-      wav: encodeMonoPcm16Wav(merged, sampleRate),
-      sampleRate,
-      sentences: chunks.length,
-      skipped
+      wav: merged.wav,
+      sampleRate: merged.sampleRate,
+      sentences: merged.merged,
+      skipped: skipped + merged.skipped
     };
   }
   enqueueUtterance(utterance) {

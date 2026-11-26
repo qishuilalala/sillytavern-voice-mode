@@ -4,8 +4,7 @@ import {
   MimoTtsEngine,
   OpenAiCompatTtsEngine,
   compileEmotionPlan,
-  decodeMonoPcm16Wav,
-  encodeMonoPcm16Wav,
+  mergeMonoPcm16WavChunks,
   type TtsSynthResult,
 } from "@voice-mode/core";
 import {
@@ -162,8 +161,7 @@ export class VoiceModeTtsHub {
    * Non-WAV engines (system text / MP3 providers) are skipped and reported.
    */
   async exportUtterances(utterances: readonly RoutedUtterance[]): Promise<TtsExportResult> {
-    const chunks: Float32Array[] = [];
-    let sampleRate = 0;
+    const wavChunks: Uint8Array[] = [];
     let skipped = 0;
     const exportedKeys: string[] = [];
     for (const utterance of utterances) {
@@ -186,45 +184,27 @@ export class VoiceModeTtsHub {
         skipped += 1;
         continue;
       }
-      const decoded = decodeMonoPcm16Wav(result.audio);
-      if (!decoded) {
-        skipped += 1;
-        continue;
-      }
-      if (sampleRate === 0) {
-        sampleRate = decoded.sampleRate;
-      }
-      if (decoded.sampleRate !== sampleRate) {
-        skipped += 1;
-        continue;
-      }
-      chunks.push(decoded.samples);
+      wavChunks.push(result.audio);
     }
     // Exporting must not leave playback bookkeeping behind.
     for (const key of exportedKeys) {
       this.pendingInfo.delete(key);
     }
-    if (chunks.length === 0) {
+    const merged = mergeMonoPcm16WavChunks(wavChunks);
+    if (!merged) {
       return {
         wav: null,
-        sampleRate,
+        sampleRate: 0,
         sentences: 0,
-        skipped,
-        reason: skipped > 0 ? "no-wav-engine" : "empty",
+        skipped: skipped + wavChunks.length,
+        reason: "no-wav-engine",
       };
     }
-    const totalSamples = chunks.reduce((sum, chunk) => sum + chunk.length, 0);
-    const merged = new Float32Array(totalSamples);
-    let offset = 0;
-    for (const chunk of chunks) {
-      merged.set(chunk, offset);
-      offset += chunk.length;
-    }
     return {
-      wav: encodeMonoPcm16Wav(merged, sampleRate),
-      sampleRate,
-      sentences: chunks.length,
-      skipped,
+      wav: merged.wav,
+      sampleRate: merged.sampleRate,
+      sentences: merged.merged,
+      skipped: skipped + merged.skipped,
     };
   }
 
