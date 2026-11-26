@@ -84,7 +84,7 @@ test("VoiceModeRuntime wires SillyTavern events, starts TTS before GENERATION_EN
     extensionPromptRoles: { SYSTEM: 0, USER: 1, ASSISTANT: 2 },
     extensionSettings,
     getContext: () => ({
-      chat,
+      chat: [],
       characters: [{ name: "Seraphina", avatar: "seraphina.png" }],
       groups: [],
       name1: "User",
@@ -319,7 +319,7 @@ function createDrawerFixture({ translate, secrets, secure = true, firstCharacter
     extensionPromptRoles: { SYSTEM: 0 },
     extensionSettings,
     getContext: () => ({
-      chat: [],
+      chat,
       characters,
       groups: [],
       name1: "User",
