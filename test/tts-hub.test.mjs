@@ -326,3 +326,49 @@ test("VoiceModeTtsHub export reports no-wav-engine when the route produces text"
   assert.equal(result.reason, "no-wav-engine");
   await hub.dispose();
 });
+
+test("VoiceModeTtsHub exports WAV through the real kokoro-daemon request path", async () => {
+  const wavBytes = makeSineWavBytes(30, 24000);
+  const settings = ensureExtensionSettings({
+    voice_mode: {
+      enabled: true,
+      defaultVoice: { engine: "kokoro-daemon", voice: "zf_001" },
+      daemonBaseUrl: "http://127.0.0.1:18790",
+    },
+  });
+  const hub = new VoiceModeTtsHub({
+    getSettings: () => settings,
+    getSecret: async () => null,
+    fetchImpl: async (url) => {
+      const u = String(url);
+      if (u.endsWith("/v1/health")) {
+        return new Response(
+          JSON.stringify({
+            ok: true,
+            service: "voice-daemon",
+            version: "0.1.0",
+            capabilities: ["tts"],
+            voices: ["zf_001"],
+          }),
+          { status: 200, headers: { "content-type": "application/json" } },
+        );
+      }
+      return new Response(wavBytes, { status: 200, headers: { "content-type": "audio/wav" } });
+    },
+    sink: { async play() {} },
+  });
+
+  const result = await hub.exportUtterances([
+    { role: "character", speaker: "Alice", text: "Hello." },
+    { role: "character", speaker: "Alice", text: "World." },
+  ]);
+
+  assert.equal(result.sentences, 2);
+  assert.equal(result.skipped, 0);
+  assert.equal(result.sampleRate, 24000);
+  assert.ok(result.wav, "daemon export must produce a WAV");
+  const decoded = decodeMonoPcm16Wav(result.wav);
+  assert.ok(decoded);
+  assert.equal(decoded.samples.length, 2 * Math.floor((24000 * 30) / 1000));
+  await hub.dispose();
+});
