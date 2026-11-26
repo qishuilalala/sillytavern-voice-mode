@@ -11,12 +11,14 @@
 
 ## 硬约束
 
-1. 共享内核复用率 ≥74%（gate 强制）；新增逻辑优先下沉 `@voice-mode/core`。
+1. 共享内核复用率 **≥73.3%**（gate 强制，2026-11-26 因 P4 导出功能调整）；新增逻辑优先下沉 `@voice-mode/core`，调阈值前必须先抽共享（纪律见 docs/16）。
 2. 密钥只存 ST 服务端 `secrets.json` + 会话内存，绝不写入 `extension_settings`/`localStorage`。
 3. 引擎能力变化必须同步 README「Engine expression capabilities」表（来源 `@voice-mode/core`）。
 4. 打断后不得复读截断消息（`onGenerationStopped` 抑制一次 `CHARACTER_MESSAGE_RENDERED`）。
 5. 群聊说话者必须从生成消息的 name/original_avatar 解析，Voice Map 才生效。
 6. `auto_update: false` 是版本锁定治理项，不得改回。
+7. WAV 导出仅支持 WAV 能力引擎；system/MP3 引擎必须明确提示不可导出，导出防重（共享槽）。
+8. 语义端点默认关闭；开启时 final 转录只注入一次，`interimResults` 仅在该开关下启用。
 
 ## 禁止
 
