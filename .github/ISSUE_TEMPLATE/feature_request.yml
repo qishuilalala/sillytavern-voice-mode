@@ -1,0 +1,43 @@
+name: Feature request
+description: Suggest an improvement or new capability
+title: "[Feature] "
+labels: ["enhancement"]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        For behaviour that depends on a specific speech model or cloud provider, say which one — capability differences are documented in the README ("能力分级"/capability tiers).
+  - type: dropdown
+    id: area
+    attributes:
+      label: Area
+      options:
+        - Read-aloud / TTS
+        - Dictation / ASR
+        - Character voice map / narration
+        - Barge-in / interruption
+        - Emotion tags / prosody
+        - Export (WAV) / long text
+        - Settings / UI
+        - Other
+    validations:
+      required: true
+  - type: textarea
+    id: problem
+    attributes:
+      label: What problem does this solve?
+      description: Describe the user-facing scenario, not an implementation.
+    validations:
+      required: true
+  - type: textarea
+    id: proposal
+    attributes:
+      label: Proposed behaviour
+    validations:
+      required: true
+  - type: textarea
+    id: alternatives
+    attributes:
+      label: Alternatives considered
+    validations:
+      required: false

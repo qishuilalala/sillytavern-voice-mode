@@ -1,0 +1,76 @@
+name: Bug report
+description: Report a reproducible problem with Voice Mode (SillyTavern)
+title: "[Bug] "
+labels: ["bug"]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Thanks for reporting. **Do not paste API keys, tokens, or private chat text** — redact them.
+        Security vulnerabilities must be reported privately (see SECURITY.md), not in this form.
+  - type: input
+    id: version
+    attributes:
+      label: Voice Mode version
+      description: Tag shown in SillyTavern's extension manager (e.g. 0.1.0)
+      placeholder: "0.1.0"
+    validations:
+      required: true
+  - type: input
+    id: st
+    attributes:
+      label: SillyTavern version
+      placeholder: "1.19.1"
+    validations:
+      required: true
+  - type: dropdown
+    id: engine
+    attributes:
+      label: Speech engine
+      options:
+        - Browser system voices
+        - Local Voice Mode Daemon (Kokoro)
+        - OpenAI-compatible (cloud)
+        - MiMo (cloud)
+        - OpenAI-compatible / Whisper (dictation)
+        - Browser speech recognition (dictation)
+        - Other / not sure
+    validations:
+      required: true
+  - type: input
+    id: browser
+    attributes:
+      label: Browser and OS
+      placeholder: "Chrome 159 / Windows 11"
+    validations:
+      required: true
+  - type: textarea
+    id: steps
+    attributes:
+      label: Steps to reproduce
+      description: Minimal steps; mention chat type (solo/group), streaming on/off, and whether a server plugin proxy is enabled.
+    validations:
+      required: true
+  - type: textarea
+    id: expected
+    attributes:
+      label: Expected vs actual behaviour
+    validations:
+      required: true
+  - type: textarea
+    id: logs
+    attributes:
+      label: Console / server output (redacted)
+      description: Browser devtools console and SillyTavern server log lines around the failure. Remove keys and private text.
+      render: shell
+    validations:
+      required: false
+  - type: checkboxes
+    id: checks
+    attributes:
+      label: Checks
+      options:
+        - label: I searched existing issues and the CHANGELOG/README troubleshooting notes.
+          required: true
+        - label: I removed keys, tokens, and private chat content from everything pasted here.
+          required: true
