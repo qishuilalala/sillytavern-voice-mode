@@ -20,6 +20,12 @@
 7. WAV 导出仅支持 WAV 能力引擎；system/MP3 引擎必须明确提示不可导出，导出防重（共享槽）。
 8. 语义端点默认关闭；开启时 final 转录只注入一次，`interimResults` 仅在该开关下启用。
 
+## 提交前检查（2026-11-26 教训）
+
+- 删除任何 i18n key / 常量前，必须先跑完整 `pnpm run check:all`（含 typecheck）——只跑 test 会漏掉类型错误。
+- 推送后必须复核 CI 实际结论（`gh run list` / 母仓 `scripts/check-ci.mjs`）：push 成功 ≠ CI 绿。
+- 新增测试断言不得依赖本机缓存/状态（CI 是干净环境）。
+
 ## 禁止
 
 - 不 `git add -A`；提交白名单。
