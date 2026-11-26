@@ -5999,20 +5999,23 @@ function buildSystemTtsSegments(rawText, segments) {
   const leadingBreak = computeLeadingBreakMs(rawText);
   return segments.map((seg, idx) => {
     const attached = Math.max(0, Math.min(5e3, seg.preBreakMs ?? 0));
+    const rateScale = seg.slow ? 0.85 : seg.fast ? 1.15 : 1;
     if (idx === 0 && leadingBreak > 0) {
       const pre = Math.min(leadingBreak, attached);
       return {
         text: seg.text,
         whisper: seg.whisper,
         preBreakMs: pre,
-        breakAfterMs: Math.max(0, attached - pre)
+        breakAfterMs: Math.max(0, attached - pre),
+        rateScale
       };
     }
     return {
       text: seg.text,
       whisper: seg.whisper,
       preBreakMs: 0,
-      breakAfterMs: attached
+      breakAfterMs: attached,
+      rateScale
     };
   });
 }
@@ -6168,7 +6171,7 @@ var BrowserAudioSink = class {
       }
       if (signal.aborted)
         return;
-      await this.speakSingleSystemSegment(seg.text, parsed.voice, parsed.rate, seg.whisper, signal);
+      await this.speakSingleSystemSegment(seg.text, parsed.voice, parsed.rate * (seg.rateScale ?? 1), seg.whisper, signal);
       if (signal.aborted)
         return;
       if (seg.breakAfterMs > 0) {
