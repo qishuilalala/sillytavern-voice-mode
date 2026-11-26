@@ -42,6 +42,16 @@ SillyTavern runs in a mobile browser, and Voice Mode inherits whatever that brow
 
 For fully local, verified dictation, use the desktop path.
 
+## Troubleshooting
+
+| Symptom | Fix |
+| --- | --- |
+| No audio from replies | Check the speech engine in the drawer, the browser volume, and that the selected engine/key is configured; the extension falls back to system speech when the daemon is unavailable. |
+| Dictation produces no text | Grant microphone permission (the page must be a secure context: HTTPS or loopback); on mobile use the browser recognizer or configure a cloud ASR endpoint. |
+| Export reports "unavailable" | WAV export needs a WAV-capable engine (local `kokoro-daemon` or a self-hosted WAV engine); system/MP3 engines cannot export. |
+| `kokoro-daemon` requests fail | Confirm the daemon runs on `127.0.0.1:18790` and that the drawer's daemon URL/token are correct. |
+| Bug reports | Click **Copy diagnostics** in the drawer and paste the redacted snapshot into the issue. |
+
 ## Capability tiers
 
 The extension works immediately with zero configuration, but the advertised features deepen with the backend you choose:
