@@ -114,6 +114,19 @@ node scripts/install-server-plugin.mjs /path/to/SillyTavern
 # 在 SillyTavern 的 config.yaml 中设置 enableServerPlugins: true 并重启服务
 ```
 
+## 远程 / 局域网主机上的麦克风权限（`window.isSecureContext`）
+
+浏览器仅允许安全上下文访问 `navigator.mediaDevices.getUserMedia`：
+- 本机回环（`http://127.0.0.1:8000` 或 `http://localhost:8000`）无需 TLS。
+- 局域网 / Termux / 远程服务器：用 SSH 端口转发（`ssh -L 8000:127.0.0.1:8000 user@host`）或启用 HTTPS（SillyTavern `config.yaml` 的 `ssl.enabled: true`、Caddy/Nginx TLS 或 Tailscale HTTPS）。
+
+若浏览器拒绝麦克风权限：在地址栏允许站点使用麦克风并检查系统麦克风权限。浏览器识别不可用时，改用本机守护进程或已配置的 Whisper 端点；朗读无声时，确认已开启流式朗读、标签页未静音且所选音色可用。
+
+## 键盘快捷键
+
+- `Alt+Shift+B` —— 立即语音打断（停止 TTS 播放并中止进行中的 LLM 生成）。
+- `Alt+Shift+V` — 开始/停止麦克风语音听写（写入 `#send_textarea`）。
+
 ## 开发与验证
 
 开发需要 Node.js `>= 22.18.0` 和 `pnpm@12.21.0`。安装者直接使用仓库中的 `dist/index.js`。开发时修改界面或代码后，重新构建并提交对应的安装文件。详见[开发入口](./CONTEXT.md)。
