@@ -84,7 +84,7 @@ test("VoiceModeRuntime wires SillyTavern events, starts TTS before GENERATION_EN
     extensionPromptRoles: { SYSTEM: 0, USER: 1, ASSISTANT: 2 },
     extensionSettings,
     getContext: () => ({
-      chat: [],
+      chat,
       characters: [{ name: "Seraphina", avatar: "seraphina.png" }],
       groups: [],
       name1: "User",
@@ -291,7 +291,7 @@ function createMiniDom() {
   };
 }
 
-function createDrawerFixture({ translate, secrets, secure = true, firstCharacter = "Alice" } = {}) {
+function createDrawerFixture({ translate, secrets, secure = true, firstCharacter = "Alice", chat = [] } = {}) {
   const eventSource = createFakeEventSource();
   const doc = createMiniDom();
   const extensionSettings = { voice_mode: { enabled: true } };
@@ -623,6 +623,33 @@ test("Export chat button reports an empty chat instead of failing silently", asy
     doc.getElementById("vm_st_export_chat_btn").click();
     await new Promise((resolve) => setTimeout(resolve, 10));
     assert.equal(badge.textContent, "没有可导出的回复。");
+  } finally {
+    await runtime.dispose();
+  }
+});
+
+
+test("Export chat collects recent AI replies in order and reports a non-WAV engine", async () => {
+  const chat = [
+    { is_user: true, mes: "hello from the user" },
+    { is_user: false, name: "Alice", mes: "First reply. Second sentence." },
+    { is_user: false, name: "Alice", mes: "Third reply here." },
+  ];
+  const { doc, runtime } = createDrawerFixture({
+    chat,
+    translate: (fallback, key) => chineseCatalog[key] || fallback,
+  });
+  try {
+    await runtime.activate();
+    const badge = doc.getElementById("voice_mode_settings_drawer").children[0].children[1];
+    doc.getElementById("vm_st_export_chat_btn").click();
+    await new Promise((resolve) => setTimeout(resolve, 30));
+    // Default engine is system: the multi-reply path must run (collect + segment) and then
+    // report that system speech cannot produce WAV instead of crashing or hanging.
+    assert.equal(
+      badge.textContent,
+      "当前 TTS 引擎无法导出 WAV；需要本地语音守护进程或支持 WAV 的引擎。",
+    );
   } finally {
     await runtime.dispose();
   }
