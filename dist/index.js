@@ -7443,7 +7443,32 @@ function buildSettingsDrawer(doc, hostContainer, options) {
       }
     })();
   });
-  actions.append(dictateBtn, bargeBtn, exportBtn);
+  const diagBtn = makeEl(
+    doc,
+    "button",
+    "menu_button",
+    text("copy_diagnostics", "Copy diagnostics")
+  );
+  diagBtn.type = "button";
+  diagBtn.id = "vm_st_copy_diagnostics_btn";
+  diagBtn.addEventListener("click", () => {
+    void (async () => {
+      try {
+        const payload = JSON.stringify(options.getDiagnostics(), null, 2);
+        const nav = doc.defaultView?.navigator;
+        const clipboard = nav?.clipboard;
+        if (!clipboard?.writeText) throw new Error("clipboard unavailable");
+        await clipboard.writeText(payload);
+        statusBadgeEl.textContent = text("diagnostics_copied", "Diagnostics copied to clipboard.");
+      } catch {
+        statusBadgeEl.textContent = text(
+          "diagnostics_copy_failed",
+          "Could not copy diagnostics (clipboard unavailable)."
+        );
+      }
+    })();
+  });
+  actions.append(dictateBtn, bargeBtn, exportBtn, diagBtn);
   content.appendChild(actions);
   root.append(header, content);
   hostContainer.appendChild(root);
@@ -7709,10 +7734,23 @@ function createVoiceModeRuntime(host) {
         }
       },
       toggleDictation,
-      exportLastReplyAsWav
+      exportLastReplyAsWav,
+      getDiagnostics: collectDiagnostics
     });
     return drawer.root;
   };
+  const collectDiagnostics = () => ({
+    activated,
+    emotionPromptRegistered,
+    firstSentenceLeadMs,
+    lastFirstUtteranceAtMs: turnFirstPlayStartMs,
+    lastGenerationEndedAtMs: turnEndedMs,
+    totalBargeIns: io.totalBargeIns,
+    lastDaemonFallbackReason,
+    lastError,
+    secureOrigin: io.checkSecureOrigin(),
+    utteranceHistory: utteranceHistory.slice(-10)
+  });
   return {
     async activate() {
       if (activated) return;
@@ -7823,18 +7861,7 @@ function createVoiceModeRuntime(host) {
     mountSettingsDrawer,
     waitUntilIdle: () => ttsHub.waitUntilDrained(),
     getDiagnostics() {
-      return {
-        activated,
-        emotionPromptRegistered,
-        firstSentenceLeadMs,
-        lastFirstUtteranceAtMs: turnFirstPlayStartMs,
-        lastGenerationEndedAtMs: turnEndedMs,
-        totalBargeIns: io.totalBargeIns,
-        lastDaemonFallbackReason,
-        lastError,
-        secureOrigin: io.checkSecureOrigin(),
-        utteranceHistory: [...utteranceHistory]
-      };
+      return collectDiagnostics();
     }
   };
 }

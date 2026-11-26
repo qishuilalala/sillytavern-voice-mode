@@ -403,9 +403,23 @@ export function createVoiceModeRuntime(host: SillyTavernHostBridge): VoiceModeRu
       },
       toggleDictation,
       exportLastReplyAsWav,
+      getDiagnostics: collectDiagnostics,
     });
     return drawer.root;
   };
+
+  const collectDiagnostics = (): VoiceModeDiagnostics => ({
+    activated,
+    emotionPromptRegistered,
+    firstSentenceLeadMs,
+    lastFirstUtteranceAtMs: turnFirstPlayStartMs,
+    lastGenerationEndedAtMs: turnEndedMs,
+    totalBargeIns: io.totalBargeIns,
+    lastDaemonFallbackReason,
+    lastError,
+    secureOrigin: io.checkSecureOrigin(),
+    utteranceHistory: utteranceHistory.slice(-10),
+  });
 
   return {
     async activate(): Promise<void> {
@@ -523,18 +537,7 @@ export function createVoiceModeRuntime(host: SillyTavernHostBridge): VoiceModeRu
     mountSettingsDrawer,
     waitUntilIdle: () => ttsHub.waitUntilDrained(),
     getDiagnostics(): VoiceModeDiagnostics {
-      return {
-        activated,
-        emotionPromptRegistered,
-        firstSentenceLeadMs,
-        lastFirstUtteranceAtMs: turnFirstPlayStartMs,
-        lastGenerationEndedAtMs: turnEndedMs,
-        totalBargeIns: io.totalBargeIns,
-        lastDaemonFallbackReason,
-        lastError,
-        secureOrigin: io.checkSecureOrigin(),
-        utteranceHistory: [...utteranceHistory],
-      };
+      return collectDiagnostics();
     },
   };
 }

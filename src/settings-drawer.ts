@@ -18,6 +18,7 @@ interface DrawerOptions {
   triggerBargeIn: () => void;
   saveSecret: (slot: SecretSlot, value: string) => Promise<void>;
   toggleDictation: () => void;
+  getDiagnostics: () => unknown;
   exportLastReplyAsWav: () => Promise<{
     sentences: number;
     skipped: number;
@@ -425,7 +426,33 @@ export function buildSettingsDrawer(
     })();
   });
 
-  actions.append(dictateBtn, bargeBtn, exportBtn);
+  const diagBtn = makeEl(
+    doc,
+    "button",
+    "menu_button",
+    text("copy_diagnostics", "Copy diagnostics"),
+  ) as HTMLButtonElement;
+  diagBtn.type = "button";
+  diagBtn.id = "vm_st_copy_diagnostics_btn";
+  diagBtn.addEventListener("click", () => {
+    void (async () => {
+      try {
+        const payload = JSON.stringify(options.getDiagnostics(), null, 2);
+        const nav = (doc.defaultView as (Window & typeof globalThis) | null)?.navigator;
+        const clipboard = nav?.clipboard;
+        if (!clipboard?.writeText) throw new Error("clipboard unavailable");
+        await clipboard.writeText(payload);
+        statusBadgeEl.textContent = text("diagnostics_copied", "Diagnostics copied to clipboard.");
+      } catch {
+        statusBadgeEl.textContent = text(
+          "diagnostics_copy_failed",
+          "Could not copy diagnostics (clipboard unavailable).",
+        );
+      }
+    })();
+  });
+
+  actions.append(dictateBtn, bargeBtn, exportBtn, diagBtn);
   content.appendChild(actions);
 
   root.append(header, content);
