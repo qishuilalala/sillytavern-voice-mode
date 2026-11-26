@@ -340,38 +340,48 @@ export function createVoiceModeRuntime(host: SillyTavernHostBridge): VoiceModeRu
     }
   };
 
-  const exportLastReplyAsWav = async (): Promise<{
+  const collectRepliesForExport = (
+    limit: number,
+  ): Array<{ mes: string; name?: string }> => {
+    const ctx = host.getContext();
+    const chat = Array.isArray(ctx.chat) ? ctx.chat : [];
+    const replies: Array<{ mes: string; name?: string }> = [];
+    for (let i = chat.length - 1; i >= 0 && replies.length < limit; i--) {
+      const message = chat[i] as { mes?: unknown; name?: unknown; is_user?: unknown } | undefined;
+      if (!message || message.is_user === true) continue;
+      const mes = typeof message.mes === "string" ? message.mes.trim() : "";
+      if (!mes) continue;
+      replies.push({ mes, name: typeof message.name === "string" ? message.name : undefined });
+    }
+    return replies.reverse();
+  };
+
+  const exportRepliesAsWav = async (limit: number): Promise<{
     sentences: number;
     skipped: number;
     reason?: "no-wav-engine" | "empty";
     wav: Uint8Array | null;
   }> => {
-    const ctx = host.getContext();
-    const chat = Array.isArray(ctx.chat) ? ctx.chat : [];
-    let lastReply: { mes?: string; name?: string } | undefined;
-    for (let i = chat.length - 1; i >= 0; i--) {
-      const message = chat[i] as { mes?: unknown; name?: unknown; is_user?: unknown } | undefined;
-      if (!message || message.is_user === true) continue;
-      const mes = typeof message.mes === "string" ? message.mes.trim() : "";
-      if (!mes) continue;
-      lastReply = { mes, name: typeof message.name === "string" ? message.name : undefined };
-      break;
-    }
-    if (!lastReply?.mes) {
+    const replies = collectRepliesForExport(limit);
+    if (replies.length === 0) {
       return { sentences: 0, skipped: 0, reason: "empty", wav: null };
     }
-    const speaker = lastReply.name || resolveActiveSpeaker().speaker;
-    const segmenter = new SentenceSegmenter({ maxSentenceChars: 200 });
-    const sentences = [...segmenter.feed(lastReply.mes), ...segmenter.flush()]
-      .map((sentence) => sentence.trim())
-      .filter((sentence) => sentence.length > 0);
-    const utterances = sentences.map((text) => ({
-      role: "character" as const,
-      speaker,
-      text,
-    }));
+    const utterances: Array<{ role: "character"; speaker: string; text: string }> = [];
+    for (const reply of replies) {
+      const speaker = reply.name || resolveActiveSpeaker().speaker;
+      const segmenter = new SentenceSegmenter({ maxSentenceChars: 200 });
+      const sentences = [...segmenter.feed(reply.mes), ...segmenter.flush()]
+        .map((sentence) => sentence.trim())
+        .filter((sentence) => sentence.length > 0);
+      for (const text of sentences) {
+        utterances.push({ role: "character", speaker, text });
+      }
+    }
     return ttsHub.exportUtterances(utterances);
   };
+
+  const exportLastReplyAsWav = () => exportRepliesAsWav(1);
+  const exportRecentRepliesAsWav = () => exportRepliesAsWav(10);
 
   const mountSettingsDrawer = (explicitDoc?: Document | null): HTMLElement | null => {
     const doc = explicitDoc ?? getDoc();
@@ -403,6 +413,7 @@ export function createVoiceModeRuntime(host: SillyTavernHostBridge): VoiceModeRu
       },
       toggleDictation,
       exportLastReplyAsWav,
+      exportRecentRepliesAsWav,
       getDiagnostics: collectDiagnostics,
     });
     return drawer.root;

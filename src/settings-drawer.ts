@@ -19,6 +19,12 @@ interface DrawerOptions {
   saveSecret: (slot: SecretSlot, value: string) => Promise<void>;
   toggleDictation: () => void;
   getDiagnostics: () => unknown;
+  exportRecentRepliesAsWav: () => Promise<{
+    sentences: number;
+    skipped: number;
+    reason?: "no-wav-engine" | "empty";
+    wav: Uint8Array | null;
+  }>;
   exportLastReplyAsWav: () => Promise<{
     sentences: number;
     skipped: number;
@@ -386,13 +392,21 @@ export function buildSettingsDrawer(
   exportBtn.type = "button";
   exportBtn.id = "vm_st_export_wav_btn";
   let exportInProgress = false;
-  exportBtn.addEventListener("click", () => {
+  const runExport = (
+    start: () => Promise<{
+      sentences: number;
+      skipped: number;
+      reason?: "no-wav-engine" | "empty";
+      wav: Uint8Array | null;
+    }>,
+    fileName: string,
+  ): void => {
     if (exportInProgress) return;
     exportInProgress = true;
     void (async () => {
       statusBadgeEl.textContent = text("exporting", "Exporting…");
       try {
-        const result = await options.exportLastReplyAsWav();
+        const result = await start();
         if (!result.wav) {
           statusBadgeEl.textContent =
             result.reason === "empty"
@@ -411,7 +425,7 @@ export function buildSettingsDrawer(
           const url = URL.createObjectURL(new Blob([wavBuffer], { type: "audio/wav" }));
           const link = doc.createElement("a");
           link.href = url;
-          link.download = `voice-mode-${Date.now()}.wav`;
+          link.download = `${fileName}-${Date.now()}.wav`;
           link.click();
           URL.revokeObjectURL(url);
         } catch {
@@ -424,7 +438,20 @@ export function buildSettingsDrawer(
         exportInProgress = false;
       }
     })();
-  });
+  };
+  exportBtn.addEventListener("click", () => runExport(options.exportLastReplyAsWav, "voice-mode"));
+
+  const exportChatBtn = makeEl(
+    doc,
+    "button",
+    "menu_button",
+    text("export_chat", "Export last 10 replies as WAV"),
+  ) as HTMLButtonElement;
+  exportChatBtn.type = "button";
+  exportChatBtn.id = "vm_st_export_chat_btn";
+  exportChatBtn.addEventListener("click", () =>
+    runExport(options.exportRecentRepliesAsWav, "voice-mode-chat"),
+  );
 
   const diagBtn = makeEl(
     doc,
@@ -452,7 +479,7 @@ export function buildSettingsDrawer(
     })();
   });
 
-  actions.append(dictateBtn, bargeBtn, exportBtn, diagBtn);
+  actions.append(dictateBtn, bargeBtn, exportBtn, exportChatBtn, diagBtn);
   content.appendChild(actions);
 
   root.append(header, content);

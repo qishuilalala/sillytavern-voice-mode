@@ -67,5 +67,6 @@
   "voice_mode.export_failed": "导出失败，请检查控制台后重试。",
   "voice_mode.copy_diagnostics": "复制诊断信息",
   "voice_mode.diagnostics_copied": "诊断信息已复制到剪贴板。",
-  "voice_mode.diagnostics_copy_failed": "无法复制诊断信息（剪贴板不可用）。"
+  "voice_mode.diagnostics_copy_failed": "无法复制诊断信息（剪贴板不可用）。",
+  "voice_mode.export_chat": "导出最近 10 条回复为 WAV"
 }

@@ -438,6 +438,8 @@ test("Settings drawer uses the SillyTavern locale and falls back to English per 
         assert.equal(exportWav.textContent, chinese ? "导出最近回复为 WAV" : "Export last reply as WAV");
         const diagBtn = doc.getElementById("vm_st_copy_diagnostics_btn");
         assert.equal(diagBtn.textContent, chinese ? "复制诊断信息" : "Copy diagnostics");
+        const exportChat = doc.getElementById("vm_st_export_chat_btn");
+        assert.equal(exportChat.textContent, chinese ? "导出最近 10 条回复为 WAV" : "Export last 10 replies as WAV");
         assert.equal(dictate.disabled, true);
         assert.equal(doc.getElementById("vm_st_barge_in_btn").textContent, barge);
         const banner = content.children[0];
@@ -605,6 +607,22 @@ test("Diagnostics button reports a clipboard failure instead of failing silently
     doc.getElementById("vm_st_copy_diagnostics_btn").click();
     await new Promise((resolve) => setTimeout(resolve, 10));
     assert.equal(badge.textContent, "无法复制诊断信息（剪贴板不可用）。");
+  } finally {
+    await runtime.dispose();
+  }
+});
+
+
+test("Export chat button reports an empty chat instead of failing silently", async () => {
+  const { doc, runtime } = createDrawerFixture({
+    translate: (fallback, key) => chineseCatalog[key] || fallback,
+  });
+  try {
+    await runtime.activate();
+    const badge = doc.getElementById("voice_mode_settings_drawer").children[0].children[1];
+    doc.getElementById("vm_st_export_chat_btn").click();
+    await new Promise((resolve) => setTimeout(resolve, 10));
+    assert.equal(badge.textContent, "没有可导出的回复。");
   } finally {
     await runtime.dispose();
   }

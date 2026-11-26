@@ -7408,13 +7408,13 @@ function buildSettingsDrawer(doc, hostContainer, options) {
   exportBtn.type = "button";
   exportBtn.id = "vm_st_export_wav_btn";
   let exportInProgress = false;
-  exportBtn.addEventListener("click", () => {
+  const runExport = (start, fileName) => {
     if (exportInProgress) return;
     exportInProgress = true;
     void (async () => {
       statusBadgeEl.textContent = text("exporting", "Exporting\u2026");
       try {
-        const result = await options.exportLastReplyAsWav();
+        const result = await start();
         if (!result.wav) {
           statusBadgeEl.textContent = result.reason === "empty" ? text("export_empty", "No reply to export.") : text(
             "export_no_wav",
@@ -7430,7 +7430,7 @@ function buildSettingsDrawer(doc, hostContainer, options) {
           const url = URL.createObjectURL(new Blob([wavBuffer], { type: "audio/wav" }));
           const link = doc.createElement("a");
           link.href = url;
-          link.download = `voice-mode-${Date.now()}.wav`;
+          link.download = `${fileName}-${Date.now()}.wav`;
           link.click();
           URL.revokeObjectURL(url);
         } catch {
@@ -7442,7 +7442,20 @@ function buildSettingsDrawer(doc, hostContainer, options) {
         exportInProgress = false;
       }
     })();
-  });
+  };
+  exportBtn.addEventListener("click", () => runExport(options.exportLastReplyAsWav, "voice-mode"));
+  const exportChatBtn = makeEl(
+    doc,
+    "button",
+    "menu_button",
+    text("export_chat", "Export last 10 replies as WAV")
+  );
+  exportChatBtn.type = "button";
+  exportChatBtn.id = "vm_st_export_chat_btn";
+  exportChatBtn.addEventListener(
+    "click",
+    () => runExport(options.exportRecentRepliesAsWav, "voice-mode-chat")
+  );
   const diagBtn = makeEl(
     doc,
     "button",
@@ -7468,7 +7481,7 @@ function buildSettingsDrawer(doc, hostContainer, options) {
       }
     })();
   });
-  actions.append(dictateBtn, bargeBtn, exportBtn, diagBtn);
+  actions.append(dictateBtn, bargeBtn, exportBtn, exportChatBtn, diagBtn);
   content.appendChild(actions);
   root.append(header, content);
   hostContainer.appendChild(root);
@@ -7685,31 +7698,37 @@ function createVoiceModeRuntime(host) {
       void io.startDictation().catch(showMicError);
     }
   };
-  const exportLastReplyAsWav = async () => {
+  const collectRepliesForExport = (limit) => {
     const ctx = host.getContext();
     const chat = Array.isArray(ctx.chat) ? ctx.chat : [];
-    let lastReply;
-    for (let i = chat.length - 1; i >= 0; i--) {
+    const replies = [];
+    for (let i = chat.length - 1; i >= 0 && replies.length < limit; i--) {
       const message = chat[i];
       if (!message || message.is_user === true) continue;
       const mes = typeof message.mes === "string" ? message.mes.trim() : "";
       if (!mes) continue;
-      lastReply = { mes, name: typeof message.name === "string" ? message.name : void 0 };
-      break;
+      replies.push({ mes, name: typeof message.name === "string" ? message.name : void 0 });
     }
-    if (!lastReply?.mes) {
+    return replies.reverse();
+  };
+  const exportRepliesAsWav = async (limit) => {
+    const replies = collectRepliesForExport(limit);
+    if (replies.length === 0) {
       return { sentences: 0, skipped: 0, reason: "empty", wav: null };
     }
-    const speaker = lastReply.name || resolveActiveSpeaker().speaker;
-    const segmenter = new SentenceSegmenter({ maxSentenceChars: 200 });
-    const sentences = [...segmenter.feed(lastReply.mes), ...segmenter.flush()].map((sentence) => sentence.trim()).filter((sentence) => sentence.length > 0);
-    const utterances = sentences.map((text2) => ({
-      role: "character",
-      speaker,
-      text: text2
-    }));
+    const utterances = [];
+    for (const reply of replies) {
+      const speaker = reply.name || resolveActiveSpeaker().speaker;
+      const segmenter = new SentenceSegmenter({ maxSentenceChars: 200 });
+      const sentences = [...segmenter.feed(reply.mes), ...segmenter.flush()].map((sentence) => sentence.trim()).filter((sentence) => sentence.length > 0);
+      for (const text2 of sentences) {
+        utterances.push({ role: "character", speaker, text: text2 });
+      }
+    }
     return ttsHub.exportUtterances(utterances);
   };
+  const exportLastReplyAsWav = () => exportRepliesAsWav(1);
+  const exportRecentRepliesAsWav = () => exportRepliesAsWav(10);
   const mountSettingsDrawer = (explicitDoc) => {
     const doc = explicitDoc ?? getDoc();
     if (!doc) return null;
@@ -7735,6 +7754,7 @@ function createVoiceModeRuntime(host) {
       },
       toggleDictation,
       exportLastReplyAsWav,
+      exportRecentRepliesAsWav,
       getDiagnostics: collectDiagnostics
     });
     return drawer.root;
