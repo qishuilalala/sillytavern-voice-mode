@@ -3,7 +3,7 @@
   "version": "0.1.0",
   "private": true,
   "type": "module",
-  "description": "Local-first streaming TTS, hands-free AEC3 barge-in, multi-character voice map, and emotion-aware voice mode extension for SillyTavern.",
+  "description": "SillyTavern 流式语音扩展：逐句朗读、AEC3 免提打断、角色音色映射与情感标签 DSL。",
   "license": "MIT",
   "author": "qishuilalala",
   "packageManager": "pnpm@12.21.0",
