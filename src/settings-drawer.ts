@@ -384,7 +384,10 @@ export function buildSettingsDrawer(
   ) as HTMLButtonElement;
   exportBtn.type = "button";
   exportBtn.id = "vm_st_export_wav_btn";
+  let exportInProgress = false;
   exportBtn.addEventListener("click", () => {
+    if (exportInProgress) return;
+    exportInProgress = true;
     void (async () => {
       statusBadgeEl.textContent = text("exporting", "Exporting…");
       try {
@@ -416,6 +419,8 @@ export function buildSettingsDrawer(
         statusBadgeEl.textContent = text("export_done", "Exported {0} sentences to WAV.", String(result.sentences));
       } catch {
         statusBadgeEl.textContent = text("export_failed", "Export failed. Check the console and retry.");
+      } finally {
+        exportInProgress = false;
       }
     })();
   });
