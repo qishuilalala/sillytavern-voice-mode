@@ -52,6 +52,8 @@ The extension works immediately with zero configuration, but the advertised feat
 
 **Export (WAV).** The settings drawer has two export buttons: **Export last reply as WAV** (the latest character reply) and **Export last 10 replies as WAV** (the last ten AI replies, in order). Both need a WAV-capable engine (local `kokoro-daemon` or a self-hosted WAV engine); system/MP3 engines report that export is unavailable, and the buttons share a single export slot so repeated clicks cannot start concurrent exports.
 
+**Diagnostics.** The same drawer has a **Copy diagnostics** button: it copies a redacted snapshot (activation state, first-sentence latency, barge-in count, daemon fallback reason, last error, and the last 10 utterances) so bug reports include reproducible evidence.
+
 **Updates are manual.** `auto_update` is disabled so a pushed commit cannot silently change behavior for installed users; update by reinstalling the extension from the same Git URL (or pulling it manually) after checking [CHANGELOG.md](./CHANGELOG.md).
 
 Emotion tags are only audible on engines that support them; on the `system` engine they are stripped from the speech rather than read aloud.
