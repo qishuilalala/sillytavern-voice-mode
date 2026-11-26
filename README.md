@@ -39,6 +39,17 @@ The extension works immediately with zero configuration, but the advertised feat
 
 Emotion tags are only audible on engines that support them; on the `system` engine they are stripped from the speech rather than read aloud.
 
+### Engine expression capabilities
+
+Capabilities come from `@voice-mode/core`'s expression contract; unsupported facets are disclosed instead of being silently dropped.
+
+| Engine | Voices | Rate | Pause | Whisper | Emotion |
+| --- | --- | --- | --- | --- | --- |
+| `system` | host-provided | Yes | Simulated by segment splitting | Stripped | Stripped |
+| `kokoro-daemon` | 103 | Yes | Native `<break Nms>` (≤5000 ms) | Native (×0.5 gain) | — |
+| `openai-compat` | provider-dependent | Yes | provider-dependent | provider-dependent | Instructions (provider-dependent) |
+| `mimo` | 9 | Yes | provider-dependent | provider-dependent | Instructions |
+
 ## Highlights
 
 - **Mid-Stream First-Sentence Playback**: Converts SillyTavern's cumulative `STREAM_TOKEN_RECEIVED` stream into incremental deltas and feeds `@voice-mode/core`'s `SentenceSegmenter` so the first sentence speaks while tokens are still generating (`GENERATION_ENDED` flushes the tail; `CHARACTER_MESSAGE_RENDERED` covers non-streaming backends).
