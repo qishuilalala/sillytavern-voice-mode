@@ -2,6 +2,8 @@
 
 [简体中文](./README.zh-CN.md) · [Security Policy](./SECURITY.md) · [Glossary](./GLOSSARY.md) · [Changelog](./CHANGELOG.md)
 
+[![CI](https://github.com/qishuilalala/sillytavern-voice-mode/actions/workflows/ci.yml/badge.svg?branch=main)](https://github.com/qishuilalala/sillytavern-voice-mode/actions/workflows/ci.yml)
+
 Local-first streaming TTS, hands-free AEC3 Voice Barge-In, multi-character Voice Map routing, and Emotion Cue prosody for [SillyTavern](https://github.com/SillyTavern/SillyTavern) (`>= 1.19.1`).
 
 ## One-Click Installation in SillyTavern
