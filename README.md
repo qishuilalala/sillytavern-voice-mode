@@ -65,6 +65,8 @@ Capabilities come from `@voice-mode/core`'s expression contract; unsupported fac
 | `openai-compat` | provider-dependent | Yes | provider-dependent | provider-dependent | Instructions (provider-dependent) |
 | `mimo` | 9 | Yes | provider-dependent | provider-dependent | Instructions |
 
+`<slow>` and `<fast>` map to a per-segment rate multiplier on `system` speech (×0.85 / ×1.15); other scopes degrade as listed above.
+
 ## Highlights
 
 - **Mid-Stream First-Sentence Playback**: Converts SillyTavern's cumulative `STREAM_TOKEN_RECEIVED` stream into incremental deltas and feeds `@voice-mode/core`'s `SentenceSegmenter` so the first sentence speaks while tokens are still generating (`GENERATION_ENDED` flushes the tail; `CHARACTER_MESSAGE_RENDERED` covers non-streaming backends).
