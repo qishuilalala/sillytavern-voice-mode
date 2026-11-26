@@ -27,7 +27,7 @@ const requiredFiles = [
   "CODING_STANDARDS.md",
   "CONTEXT.md",
   "README.md",
-  "README.zh-CN.md",
+  "README.en.md",
   chineseLocaleFile,
   "CHANGELOG.md",
   "server-plugin/index.mjs",
@@ -40,7 +40,7 @@ for (const rel of requiredFiles) {
 }
 
 const readmeLines = fs.readFileSync(path.join(root, "README.md"), "utf8").split(/\r?\n/);
-assert.equal(readmeLines[0], "# Voice Mode", "README.md H1 must be '# Voice Mode'");
+assert.ok(readmeLines[0].startsWith("# Voice Mode"), "README.md H1 must start with '# Voice Mode' (Chinese-first heading allowed)");
 
 const contextLines = fs.readFileSync(path.join(root, "CONTEXT.md"), "utf8").split(/\r?\n/);
 assert.ok(

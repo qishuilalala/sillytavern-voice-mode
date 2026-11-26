@@ -4,7 +4,7 @@ Orientation and module map for `sillytavern-voice-mode` (`0.1.0`), a third-party
 
 ## 中文维护入口
 
-- 安装、第一次听写和朗读、语音数据去向及权限恢复见[中文使用指南](./README.zh-CN.md)。调整设置或命令时，核对英、简中界面与两份 README 的步骤。
+- 安装、第一次听写和朗读、语音数据去向及权限恢复见[中文使用指南](./README.md)。调整设置或命令时，核对英、简中界面与两份 README 的步骤。
 - 酒馆直接加载 Git 中的 `dist/index.js`。更新界面后重建，在扩展抽屉复核两种语言，并检查相应安装资源已随提交一起更新。
 - `vendor/` 固定使用母仓构建的 `core`、`browser` 两份归档。变更共享包时记录兼容的四仓提交，按母仓 [ADR-0005](https://github.com/qishuilalala/obsidian-voice-mode/blob/main/docs/adr/0005-multi-repo-package-sharing-and-daemon-seam.md) 核对全部五份归档。
 
