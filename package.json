@@ -21,7 +21,8 @@
     "lint": "eslint --max-warnings 0 .",
     "test": "node --test",
     "check:release": "node scripts/check-release-gate.mjs",
-    "check:all": "pnpm run typecheck && pnpm run lint && pnpm run test && pnpm run build && pnpm run check:release"
+    "check:all": "pnpm run typecheck && pnpm run lint && pnpm run check:i18n && pnpm run test && pnpm run build && pnpm run check:release",
+    "check:i18n": "node scripts/check-i18n.mjs"
   },
   "dependencies": {
     "@voice-mode/browser": "file:./vendor/voice-mode-browser-0.1.0.tgz",
