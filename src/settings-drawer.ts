@@ -78,17 +78,6 @@ export function buildSettingsDrawer(
   };
   showOriginStatus(originStatus);
   content.appendChild(insecureBannerEl);
-  const quickStartEl = makeEl(
-    doc,
-    "div",
-    "vm-st-quickstart",
-    text(
-      "quickstart",
-      "Quick start: enable streaming read-aloud and it works with zero configuration. Press Alt+Shift+V to dictate, Alt+Shift+B to stop/barge-in. Local voices need the optional Voice Mode Daemon; cloud voices need an API key (see README).",
-    ),
-  );
-  quickStartEl.id = "vm_st_quickstart";
-  content.appendChild(quickStartEl);
 
   const addCheckbox = (
     id: string,
