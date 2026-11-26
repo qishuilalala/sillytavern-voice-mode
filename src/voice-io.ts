@@ -7,6 +7,7 @@ import {
 import {
   AecBargeInMonitor,
   CloudDictationSession,
+  DuplexProtocol,
   FocusTextInjector,
   SherpaWorkerClient,
   computeChunkRms,
@@ -16,6 +17,7 @@ import {
   type BargeInEvent,
   type BargeInStartResult,
   type DictationSessionState,
+  type DuplexState,
   type WorkerLike,
   type WorkerResponse,
 } from "@voice-mode/browser";
@@ -168,6 +170,8 @@ export class VoiceModeIoController {
   private readonly vadWorkerClient: SherpaWorkerClient;
   private readonly monitor: AecBargeInMonitor;
   private readonly focusInjector = new FocusTextInjector();
+  /** Shared duplex state machine (P3): playback/interrupt bookkeeping stays uniform. */
+  private readonly duplex = new DuplexProtocol({ duckOnOverlap: false });
   private cloudSession: CloudDictationSession | null = null;
   private daemonAsrClient: DaemonClient | null = null;
   private systemRecognition: BrowserSpeechRecognitionLike | null = null;
@@ -226,9 +230,13 @@ export class VoiceModeIoController {
    */
   triggerBargeIn(source: "aec3" | "manual" = "manual", event?: BargeInEvent): void {
     this.bargeInCount++;
+    const transition = this.duplex.feed({ type: "barge-in" });
+    const actions = new Set(transition.actions);
     void this.monitor.stop();
-    this.options.cancelPlayback();
-    if (this.options.isGenerating()) {
+    if (actions.has("stop-playback")) {
+      this.options.cancelPlayback();
+    }
+    if (actions.has("cancel-generation") && this.options.isGenerating()) {
       this.options.stopGeneration();
     }
     this.options.onBargeInTriggered?.(source, event);
@@ -245,14 +253,24 @@ export class VoiceModeIoController {
         aecProbe: null,
       };
     }
-    return this.monitor.start({
+    const started = await this.monitor.start({
       bargeInMode: settings.bargeInMode,
       usesSystemTts: overrides?.usesSystemTts ?? settings.defaultVoice.engine === "system",
     });
+    if (started.activePolicy === "auto") {
+      this.duplex.feed({ type: "playback-start" });
+    }
+    return started;
   }
 
   async disarmBargeIn(): Promise<void> {
     await this.monitor.stop();
+    this.duplex.feed({ type: "playback-end" });
+  }
+
+  /** Current duplex state (idle/listening/overlap/speaking/barge-in) for diagnostics. */
+  get duplexState(): DuplexState {
+    return this.duplex.snapshot().state;
   }
 
   injectDictatedText(rawText: string): string {

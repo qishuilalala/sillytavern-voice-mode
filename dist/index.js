@@ -6214,6 +6214,126 @@ var BrowserAudioSink = class {
   }
 };
 
+// node_modules/.pnpm/@voice-mode+browser@file+vendor+voice-mode-browser-0.1.0.tgz/node_modules/@voice-mode/browser/dist/duplex-protocol.js
+function clampRatio(value) {
+  if (typeof value !== "number" || !Number.isFinite(value))
+    return 0.2;
+  return Math.min(1, Math.max(0, value));
+}
+var DuplexProtocol = class {
+  state = "idle";
+  speechActive = false;
+  playbackActive = false;
+  duckOnOverlap;
+  /** Duck ratio hosts should apply when they act on `duck-playback`. */
+  duckRatio;
+  constructor(options = {}) {
+    this.duckOnOverlap = options.duckOnOverlap ?? true;
+    this.duckRatio = clampRatio(options.duckRatio);
+  }
+  snapshot() {
+    return {
+      state: this.state,
+      speechActive: this.speechActive,
+      playbackActive: this.playbackActive
+    };
+  }
+  reset() {
+    this.state = "idle";
+    this.speechActive = false;
+    this.playbackActive = false;
+  }
+  /**
+   * Feed one event and receive the actions the host must apply. Actions are
+   * ordered: stop/duck playback before cancelling generation, then capture.
+   */
+  feed(event) {
+    const from = this.state;
+    const actions = /* @__PURE__ */ new Set();
+    switch (event.type) {
+      case "speech-start": {
+        this.speechActive = true;
+        if (this.playbackActive) {
+          this.state = "overlap";
+          if (this.duckOnOverlap) {
+            actions.add("duck-playback");
+          } else {
+            actions.add("stop-playback");
+            actions.add("cancel-generation");
+          }
+        } else {
+          this.state = "listening";
+        }
+        break;
+      }
+      case "speech-end": {
+        this.speechActive = false;
+        if (this.state === "barge-in") {
+          this.state = "idle";
+        } else if (this.playbackActive) {
+          this.state = "speaking";
+        } else {
+          this.state = "idle";
+        }
+        break;
+      }
+      case "playback-start": {
+        this.playbackActive = true;
+        if (this.speechActive) {
+          this.state = "overlap";
+          if (this.duckOnOverlap) {
+            actions.add("duck-playback");
+          } else {
+            actions.add("stop-playback");
+          }
+        } else {
+          this.state = "speaking";
+        }
+        break;
+      }
+      case "playback-end": {
+        this.playbackActive = false;
+        if (this.speechActive) {
+          this.state = "listening";
+        } else if (this.state === "barge-in") {
+          this.state = "idle";
+        } else {
+          this.state = "idle";
+        }
+        break;
+      }
+      case "barge-in": {
+        this.speechActive = true;
+        this.playbackActive = false;
+        this.state = "barge-in";
+        actions.add("stop-playback");
+        actions.add("cancel-generation");
+        actions.add("flush-queue");
+        actions.add("start-capture");
+        break;
+      }
+      case "yield": {
+        this.speechActive = false;
+        if (this.playbackActive) {
+          actions.add("stop-playback");
+        }
+        actions.add("stop-capture");
+        this.state = "idle";
+        break;
+      }
+      case "reset": {
+        this.reset();
+        break;
+      }
+      default: {
+        const exhaustive = event.type;
+        void exhaustive;
+      }
+    }
+    return { from, to: this.state, actions: [...actions] };
+  }
+};
+
 // src/tts-hub.ts
 function resolveUtteranceVoice(utterance, settings, cardVoiceRaw) {
   if (utterance.role === "narrator" && settings.narrationSplitEnabled) {
@@ -6595,6 +6715,8 @@ var VoiceModeIoController = class {
   vadWorkerClient;
   monitor;
   focusInjector = new FocusTextInjector();
+  /** Shared duplex state machine (P3): playback/interrupt bookkeeping stays uniform. */
+  duplex = new DuplexProtocol({ duckOnOverlap: false });
   cloudSession = null;
   daemonAsrClient = null;
   systemRecognition = null;
@@ -6641,9 +6763,13 @@ var VoiceModeIoController = class {
    */
   triggerBargeIn(source = "manual", event) {
     this.bargeInCount++;
+    const transition = this.duplex.feed({ type: "barge-in" });
+    const actions = new Set(transition.actions);
     void this.monitor.stop();
-    this.options.cancelPlayback();
-    if (this.options.isGenerating()) {
+    if (actions.has("stop-playback")) {
+      this.options.cancelPlayback();
+    }
+    if (actions.has("cancel-generation") && this.options.isGenerating()) {
       this.options.stopGeneration();
     }
     this.options.onBargeInTriggered?.(source, event);
@@ -6659,13 +6785,22 @@ var VoiceModeIoController = class {
         aecProbe: null
       };
     }
-    return this.monitor.start({
+    const started = await this.monitor.start({
       bargeInMode: settings.bargeInMode,
       usesSystemTts: overrides?.usesSystemTts ?? settings.defaultVoice.engine === "system"
     });
+    if (started.activePolicy === "auto") {
+      this.duplex.feed({ type: "playback-start" });
+    }
+    return started;
   }
   async disarmBargeIn() {
     await this.monitor.stop();
+    this.duplex.feed({ type: "playback-end" });
+  }
+  /** Current duplex state (idle/listening/overlap/speaking/barge-in) for diagnostics. */
+  get duplexState() {
+    return this.duplex.snapshot().state;
   }
   injectDictatedText(rawText) {
     const settings = this.options.getSettings();
