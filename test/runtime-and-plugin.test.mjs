@@ -291,10 +291,17 @@ function createMiniDom() {
   };
 }
 
-function createDrawerFixture({ translate, secrets, secure = true, firstCharacter = "Alice", chat = [] } = {}) {
+function createDrawerFixture({ translate, secrets, secure = true, firstCharacter = "Alice", chat = [], defaultEngine = "system" } = {}) {
   const eventSource = createFakeEventSource();
   const doc = createMiniDom();
-  const extensionSettings = { voice_mode: { enabled: true } };
+  const extensionSettings = {
+    voice_mode: {
+      enabled: true,
+      ...(defaultEngine !== "system"
+        ? { defaultVoice: { engine: defaultEngine, voice: "" } }
+        : {}),
+    },
+  };
   let activeIdx = 0;
   const characters = [
     { name: firstCharacter, avatar: "alice.png" },
@@ -651,6 +658,45 @@ test("Export chat collects recent AI replies in order and reports a non-WAV engi
       "当前 TTS 引擎无法导出 WAV；需要本地语音守护进程或支持 WAV 的引擎。",
     );
   } finally {
+    await runtime.dispose();
+  }
+});
+
+test("Export chat end-to-end through a mocked daemon reports the exported sentence count", async () => {
+  const { encodeMonoPcm16Wav } = await import("@voice-mode/core");
+  const wav = encodeMonoPcm16Wav(new Float32Array(2400).fill(0.1), 24000);
+  const chat = [
+    { is_user: true, mes: "hello from the user" },
+    { is_user: false, name: "Alice", mes: "First reply. Second sentence." },
+    { is_user: false, name: "Alice", mes: "Third reply here." },
+  ];
+  const baseFetch = globalThis.fetch;
+  globalThis.fetch = async (url) => {
+    const u = String(url);
+    if (u.endsWith("/v1/health")) {
+      return new Response(
+        JSON.stringify({ ok: true, service: "voice-daemon", version: "0.1.0", capabilities: ["tts"], voices: [] }),
+        { status: 200, headers: { "content-type": "application/json" } },
+      );
+    }
+    return new Response(wav, { status: 200, headers: { "content-type": "audio/wav" } });
+  };
+  const { doc, runtime } = createDrawerFixture({
+    chat,
+    defaultEngine: "kokoro-daemon",
+    translate: (fallback, key) => chineseCatalog[key] || fallback,
+  });
+  try {
+    await runtime.activate();
+    const badge = doc.getElementById("voice_mode_settings_drawer").children[0].children[1];
+    doc.getElementById("vm_st_export_chat_btn").click();
+    const deadline = Date.now() + 5000;
+    while (Date.now() < deadline && !badge.textContent.includes("已导出")) {
+      await new Promise((resolve) => setTimeout(resolve, 20));
+    }
+    assert.equal(badge.textContent, "已导出 3 句为 WAV。");
+  } finally {
+    globalThis.fetch = baseFetch;
     await runtime.dispose();
   }
 });
