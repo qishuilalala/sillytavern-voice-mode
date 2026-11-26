@@ -602,6 +602,7 @@ var SentenceSegmenter = class {
 };
 
 // node_modules/.pnpm/@voice-mode+core@file+vendor+voice-mode-core-0.1.0.tgz/node_modules/@voice-mode/core/dist/asr-replacements.js
+var REPLACEMENT_LANGUAGES = ["zh", "en", "ja", "ko"];
 var REPLACEMENTS_MAX_PAYLOAD_BYTES = 12e3;
 var UTF8_ENCODER = new TextEncoder();
 var ASCII_WORD = /[A-Za-z0-9]/;
@@ -639,7 +640,19 @@ function validateReplacements(rules) {
     if (from.length === 0) {
       return { ok: false, error: `rule[${i}].from must contain at least one non-empty spelling` };
     }
-    normalized.push({ from, to: rawTo });
+    const rawLanguage = item.language;
+    let language;
+    if (rawLanguage !== void 0 && rawLanguage !== null && rawLanguage !== "") {
+      if (typeof rawLanguage !== "string" || !REPLACEMENT_LANGUAGES.includes(rawLanguage)) {
+        return { ok: false, error: `rule[${i}].language must be one of zh/en/ja/ko` };
+      }
+      language = rawLanguage;
+    }
+    normalized.push({
+      from,
+      to: rawTo,
+      ...language ? { language } : {}
+    });
   }
   const bytes = replacementsPayloadBytes(normalized);
   if (bytes > REPLACEMENTS_MAX_PAYLOAD_BYTES) {
