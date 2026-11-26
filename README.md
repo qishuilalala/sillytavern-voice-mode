@@ -4,6 +4,8 @@
 
 [![CI](https://github.com/qishuilalala/sillytavern-voice-mode/actions/workflows/ci.yml/badge.svg?branch=main)](https://github.com/qishuilalala/sillytavern-voice-mode/actions/workflows/ci.yml)
 
+> **Source build (`0.1.0`)** · The release tag is not published yet; install from the repository URL (the extension stays version-locked via `auto_update: false`).
+
 Local-first streaming TTS, hands-free AEC3 Voice Barge-In, multi-character Voice Map routing, and Emotion Cue prosody for [SillyTavern](https://github.com/SillyTavern/SillyTavern) (`>= 1.19.1`).
 
 ## One-Click Installation in SillyTavern

@@ -2,6 +2,8 @@
 
 [English](./README.md) · [安全策略](./SECURITY.md) · [领域词典](./GLOSSARY.md) · [更新日志](./CHANGELOG.md)
 
+> **源码构建（`0.1.0`）** · 正式发布 tag 尚未创建；请通过仓库地址安装（扩展以 `auto_update: false` 版本锁定）。
+
 Voice Mode 会在角色生成回复时按句朗读，也能把你说的话转成聊天输入框里的文字。角色和旁白可以使用不同音色。支持 SillyTavern `1.19.1` 及以上版本。
 
 ## 一键安装（SillyTavern 扩展管理器）
