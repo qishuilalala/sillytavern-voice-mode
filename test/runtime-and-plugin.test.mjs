@@ -434,6 +434,8 @@ test("Settings drawer uses the SillyTavern locale and falls back to English per 
         );
         const dictate = doc.getElementById("vm_st_dictate_btn");
         assert.equal(dictate.textContent, chinese ? "开始听写" : "Dictate Mic");
+        const exportWav = doc.getElementById("vm_st_export_wav_btn");
+        assert.equal(exportWav.textContent, chinese ? "导出最近回复为 WAV" : "Export last reply as WAV");
         assert.equal(dictate.disabled, true);
         assert.equal(doc.getElementById("vm_st_barge_in_btn").textContent, barge);
         const banner = content.children[0];
@@ -571,4 +573,21 @@ test("VoiceModeRuntime resolves the group-chat speaker from the generated messag
   );
 
   await runtime.dispose();
+});
+
+
+test("Export button reports an empty chat instead of failing silently", async () => {
+  const { doc, runtime } = createDrawerFixture({
+    translate: (fallback, key) => chineseCatalog[key] || fallback,
+  });
+  try {
+    await runtime.activate();
+    const exportBtn = doc.getElementById("vm_st_export_wav_btn");
+    exportBtn.click();
+    await new Promise((resolve) => setTimeout(resolve, 10));
+    const badge = doc.getElementById("voice_mode_settings_drawer").children[0].children[1];
+    assert.equal(badge.textContent, "没有可导出的回复。");
+  } finally {
+    await runtime.dispose();
+  }
 });

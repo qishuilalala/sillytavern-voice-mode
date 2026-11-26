@@ -7383,7 +7383,46 @@ function buildSettingsDrawer(doc, hostContainer, options) {
   bargeBtn.type = "button";
   bargeBtn.id = "vm_st_barge_in_btn";
   bargeBtn.addEventListener("click", options.triggerBargeIn);
-  actions.append(dictateBtn, bargeBtn);
+  const exportBtn = makeEl(
+    doc,
+    "button",
+    "menu_button",
+    text("export_wav", "Export last reply as WAV")
+  );
+  exportBtn.type = "button";
+  exportBtn.id = "vm_st_export_wav_btn";
+  exportBtn.addEventListener("click", () => {
+    void (async () => {
+      statusBadgeEl.textContent = text("exporting", "Exporting\u2026");
+      try {
+        const result = await options.exportLastReplyAsWav();
+        if (!result.wav) {
+          statusBadgeEl.textContent = result.reason === "empty" ? text("export_empty", "No reply to export.") : text(
+            "export_no_wav",
+            "Current TTS engine cannot export WAV; the local voice-daemon or a WAV-capable engine is required."
+          );
+          return;
+        }
+        try {
+          const wavBuffer = result.wav.buffer.slice(
+            result.wav.byteOffset,
+            result.wav.byteOffset + result.wav.byteLength
+          );
+          const url = URL.createObjectURL(new Blob([wavBuffer], { type: "audio/wav" }));
+          const link = doc.createElement("a");
+          link.href = url;
+          link.download = `voice-mode-${Date.now()}.wav`;
+          link.click();
+          URL.revokeObjectURL(url);
+        } catch {
+        }
+        statusBadgeEl.textContent = text("export_done", "Exported {0} sentences to WAV.", String(result.sentences));
+      } catch {
+        statusBadgeEl.textContent = text("export_failed", "Export failed. Check the console and retry.");
+      }
+    })();
+  });
+  actions.append(dictateBtn, bargeBtn, exportBtn);
   content.appendChild(actions);
   root.append(header, content);
   hostContainer.appendChild(root);
@@ -7600,6 +7639,31 @@ function createVoiceModeRuntime(host) {
       void io.startDictation().catch(showMicError);
     }
   };
+  const exportLastReplyAsWav = async () => {
+    const ctx = host.getContext();
+    const chat = Array.isArray(ctx.chat) ? ctx.chat : [];
+    let lastReply;
+    for (let i = chat.length - 1; i >= 0; i--) {
+      const message = chat[i];
+      if (!message || message.is_user === true) continue;
+      const mes = typeof message.mes === "string" ? message.mes.trim() : "";
+      if (!mes) continue;
+      lastReply = { mes, name: typeof message.name === "string" ? message.name : void 0 };
+      break;
+    }
+    if (!lastReply?.mes) {
+      return { sentences: 0, skipped: 0, reason: "empty", wav: null };
+    }
+    const speaker = lastReply.name || resolveActiveSpeaker().speaker;
+    const segmenter = new SentenceSegmenter({ maxSentenceChars: 200 });
+    const sentences = [...segmenter.feed(lastReply.mes), ...segmenter.flush()].map((sentence) => sentence.trim()).filter((sentence) => sentence.length > 0);
+    const utterances = sentences.map((text2) => ({
+      role: "character",
+      speaker,
+      text: text2
+    }));
+    return ttsHub.exportUtterances(utterances);
+  };
   const mountSettingsDrawer = (explicitDoc) => {
     const doc = explicitDoc ?? getDoc();
     if (!doc) return null;
@@ -7623,7 +7687,8 @@ function createVoiceModeRuntime(host) {
           refreshStatusText(text("secret_failed", "Could not update the server secret. Check SillyTavern and try again."));
         }
       },
-      toggleDictation
+      toggleDictation,
+      exportLastReplyAsWav
     });
     return drawer.root;
   };

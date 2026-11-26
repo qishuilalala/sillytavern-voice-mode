@@ -18,6 +18,12 @@ interface DrawerOptions {
   triggerBargeIn: () => void;
   saveSecret: (slot: SecretSlot, value: string) => Promise<void>;
   toggleDictation: () => void;
+  exportLastReplyAsWav: () => Promise<{
+    sentences: number;
+    skipped: number;
+    reason?: "no-wav-engine" | "empty";
+    wav: Uint8Array | null;
+  }>;
 }
 
 function makeEl<K extends keyof HTMLElementTagNameMap>(
@@ -370,7 +376,51 @@ export function buildSettingsDrawer(
   bargeBtn.id = "vm_st_barge_in_btn";
   bargeBtn.addEventListener("click", options.triggerBargeIn);
 
-  actions.append(dictateBtn, bargeBtn);
+  const exportBtn = makeEl(
+    doc,
+    "button",
+    "menu_button",
+    text("export_wav", "Export last reply as WAV"),
+  ) as HTMLButtonElement;
+  exportBtn.type = "button";
+  exportBtn.id = "vm_st_export_wav_btn";
+  exportBtn.addEventListener("click", () => {
+    void (async () => {
+      statusBadgeEl.textContent = text("exporting", "Exporting…");
+      try {
+        const result = await options.exportLastReplyAsWav();
+        if (!result.wav) {
+          statusBadgeEl.textContent =
+            result.reason === "empty"
+              ? text("export_empty", "No reply to export.")
+              : text(
+                  "export_no_wav",
+                  "Current TTS engine cannot export WAV; the local voice-daemon or a WAV-capable engine is required.",
+                );
+          return;
+        }
+        try {
+          const wavBuffer = result.wav.buffer.slice(
+            result.wav.byteOffset,
+            result.wav.byteOffset + result.wav.byteLength,
+          ) as ArrayBuffer;
+          const url = URL.createObjectURL(new Blob([wavBuffer], { type: "audio/wav" }));
+          const link = doc.createElement("a");
+          link.href = url;
+          link.download = `voice-mode-${Date.now()}.wav`;
+          link.click();
+          URL.revokeObjectURL(url);
+        } catch {
+          // Download API unavailable (e.g. test DOM): the export itself still succeeded.
+        }
+        statusBadgeEl.textContent = text("export_done", "Exported {0} sentences to WAV.", String(result.sentences));
+      } catch {
+        statusBadgeEl.textContent = text("export_failed", "Export failed. Check the console and retry.");
+      }
+    })();
+  });
+
+  actions.append(dictateBtn, bargeBtn, exportBtn);
   content.appendChild(actions);
 
   root.append(header, content);

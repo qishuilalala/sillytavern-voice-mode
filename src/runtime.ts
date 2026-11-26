@@ -1,4 +1,4 @@
-import { buildEmotionPromptInstruction } from "@voice-mode/core";
+import { SentenceSegmenter, buildEmotionPromptInstruction } from "@voice-mode/core";
 import type { AudioSink } from "@voice-mode/browser";
 import {
   EMOTION_PROMPT_KEY,
@@ -340,6 +340,39 @@ export function createVoiceModeRuntime(host: SillyTavernHostBridge): VoiceModeRu
     }
   };
 
+  const exportLastReplyAsWav = async (): Promise<{
+    sentences: number;
+    skipped: number;
+    reason?: "no-wav-engine" | "empty";
+    wav: Uint8Array | null;
+  }> => {
+    const ctx = host.getContext();
+    const chat = Array.isArray(ctx.chat) ? ctx.chat : [];
+    let lastReply: { mes?: string; name?: string } | undefined;
+    for (let i = chat.length - 1; i >= 0; i--) {
+      const message = chat[i] as { mes?: unknown; name?: unknown; is_user?: unknown } | undefined;
+      if (!message || message.is_user === true) continue;
+      const mes = typeof message.mes === "string" ? message.mes.trim() : "";
+      if (!mes) continue;
+      lastReply = { mes, name: typeof message.name === "string" ? message.name : undefined };
+      break;
+    }
+    if (!lastReply?.mes) {
+      return { sentences: 0, skipped: 0, reason: "empty", wav: null };
+    }
+    const speaker = lastReply.name || resolveActiveSpeaker().speaker;
+    const segmenter = new SentenceSegmenter({ maxSentenceChars: 200 });
+    const sentences = [...segmenter.feed(lastReply.mes), ...segmenter.flush()]
+      .map((sentence) => sentence.trim())
+      .filter((sentence) => sentence.length > 0);
+    const utterances = sentences.map((text) => ({
+      role: "character" as const,
+      speaker,
+      text,
+    }));
+    return ttsHub.exportUtterances(utterances);
+  };
+
   const mountSettingsDrawer = (explicitDoc?: Document | null): HTMLElement | null => {
     const doc = explicitDoc ?? getDoc();
     if (!doc) return null;
@@ -369,6 +402,7 @@ export function createVoiceModeRuntime(host: SillyTavernHostBridge): VoiceModeRu
         }
       },
       toggleDictation,
+      exportLastReplyAsWav,
     });
     return drawer.root;
   };
