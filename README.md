@@ -29,6 +29,17 @@ Browser speech synthesis uses the chosen system voice. Browser dictation may sen
 
 For cloud speech, select an OpenAI-compatible engine or MiMo for playback, or OpenAI-compatible Whisper for dictation. Check the endpoint and save the matching key with **Save Server Secret**. The speech provider receives speakable text or utterance audio. See the [data flow details](./SECURITY.md).
 
+## Mobile browsers (conditional, unverified)
+
+SillyTavern runs in a mobile browser, and Voice Mode inherits whatever that browser provides — this combination is **not verified** on physical phones, so treat mobile support as conditional:
+
+- **System voices** usually work (the browser/OS provides them); cloud engines (OpenAI-compatible / MiMo) work with a saved server secret.
+- **Hands-free AEC3 barge-in** generally degrades to the manual button (`Alt+Shift+B`) — mobile browsers rarely expose the native echo canceller this extension needs.
+- **Browser speech recognition** may work but sends audio to the browser provider (same as desktop); local `voice-daemon` needs the daemon's LAN address and token instead of loopback.
+- Export and long-text reading are CPU/queue bound; very long replies may not be suitable for phone browsers.
+
+For fully local, verified dictation, use the desktop path.
+
 ## Capability tiers
 
 The extension works immediately with zero configuration, but the advertised features deepen with the backend you choose:
