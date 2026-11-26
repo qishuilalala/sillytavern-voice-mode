@@ -4,6 +4,8 @@ import {
   MimoTtsEngine,
   OpenAiCompatTtsEngine,
   compileEmotionPlan,
+  decodeMonoPcm16Wav,
+  encodeMonoPcm16Wav,
   type TtsSynthResult,
 } from "@voice-mode/core";
 import {
@@ -45,6 +47,15 @@ interface QueuedEnvelope {
   avatar?: string;
   text: string;
   cardVoice?: VoiceAssignment;
+}
+
+/** Result of exporting chat utterances into a single WAV file (P4 parity). */
+export interface TtsExportResult {
+  wav: Uint8Array | null;
+  sampleRate: number;
+  sentences: number;
+  skipped: number;
+  reason?: "no-wav-engine" | "empty";
 }
 
 export interface VoiceModeTtsHubOptions {
@@ -144,6 +155,77 @@ export class VoiceModeTtsHub {
       return this.lastUsesSystemTts;
     }
     return settings.defaultVoice.engine === "system";
+  }
+
+  /**
+   * Synthesize utterances without playing and merge WAV-capable output into one file.
+   * Non-WAV engines (system text / MP3 providers) are skipped and reported.
+   */
+  async exportUtterances(utterances: readonly RoutedUtterance[]): Promise<TtsExportResult> {
+    const chunks: Float32Array[] = [];
+    let sampleRate = 0;
+    let skipped = 0;
+    const exportedKeys: string[] = [];
+    for (const utterance of utterances) {
+      const envelope = JSON.stringify({
+        seq: ++this.seq,
+        role: utterance.role,
+        speaker: utterance.speaker,
+        ...(utterance.avatar ? { avatar: utterance.avatar } : {}),
+        text: utterance.text,
+      });
+      exportedKeys.push(envelope);
+      let result: TtsSynthResult | null = null;
+      try {
+        result = await this.synthesizeEnvelope(envelope, new AbortController().signal);
+      } catch {
+        skipped += 1;
+        continue;
+      }
+      if (!result || result.mime !== "audio/wav") {
+        skipped += 1;
+        continue;
+      }
+      const decoded = decodeMonoPcm16Wav(result.audio);
+      if (!decoded) {
+        skipped += 1;
+        continue;
+      }
+      if (sampleRate === 0) {
+        sampleRate = decoded.sampleRate;
+      }
+      if (decoded.sampleRate !== sampleRate) {
+        skipped += 1;
+        continue;
+      }
+      chunks.push(decoded.samples);
+    }
+    // Exporting must not leave playback bookkeeping behind.
+    for (const key of exportedKeys) {
+      this.pendingInfo.delete(key);
+    }
+    if (chunks.length === 0) {
+      return {
+        wav: null,
+        sampleRate,
+        sentences: 0,
+        skipped,
+        reason: skipped > 0 ? "no-wav-engine" : "empty",
+      };
+    }
+    const totalSamples = chunks.reduce((sum, chunk) => sum + chunk.length, 0);
+    const merged = new Float32Array(totalSamples);
+    let offset = 0;
+    for (const chunk of chunks) {
+      merged.set(chunk, offset);
+      offset += chunk.length;
+    }
+    return {
+      wav: encodeMonoPcm16Wav(merged, sampleRate),
+      sampleRate,
+      sentences: chunks.length,
+      skipped,
+    };
   }
 
   enqueueUtterance(utterance: RoutedUtterance): boolean {

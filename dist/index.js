@@ -2118,6 +2118,45 @@ function resolveTranscriptionsEndpointUrl(baseUrl) {
     isLoopbackHttp: url.startsWith("http://")
   };
 }
+function decodeMonoPcm16Wav(input) {
+  if (input.byteLength < 44)
+    return null;
+  const view = new DataView(input.buffer, input.byteOffset, input.byteLength);
+  const tag = (offset2) => String.fromCharCode(input[offset2] ?? 0, input[offset2 + 1] ?? 0, input[offset2 + 2] ?? 0, input[offset2 + 3] ?? 0);
+  if (tag(0) !== "RIFF" || tag(8) !== "WAVE")
+    return null;
+  let offset = 12;
+  let sampleRate = 0;
+  let channels = 1;
+  let bitsPerSample = 16;
+  let dataStart = -1;
+  let dataSize = 0;
+  while (offset + 8 <= input.byteLength) {
+    const id = tag(offset);
+    const size = view.getUint32(offset + 4, true);
+    const body = offset + 8;
+    if (id === "fmt ") {
+      if (body + 16 > input.byteLength)
+        return null;
+      channels = view.getUint16(body + 2, true);
+      sampleRate = view.getUint32(body + 4, true);
+      bitsPerSample = view.getUint16(body + 14, true);
+    } else if (id === "data") {
+      dataStart = body;
+      dataSize = Math.min(size, input.byteLength - body);
+      break;
+    }
+    offset = body + size + size % 2;
+  }
+  if (dataStart < 0 || sampleRate <= 0 || bitsPerSample !== 16 || channels !== 1)
+    return null;
+  const count = Math.floor(dataSize / 2);
+  const samples = new Float32Array(count);
+  for (let i = 0; i < count; i++) {
+    samples[i] = view.getInt16(dataStart + i * 2, true) / 32768;
+  }
+  return { samples, sampleRate };
+}
 function encodeMonoPcm16Wav(samples, sampleRate = DEFAULT_SAMPLE_RATE) {
   const rate = typeof sampleRate === "number" && Number.isFinite(sampleRate) && sampleRate > 0 ? Math.round(sampleRate) : DEFAULT_SAMPLE_RATE;
   const numSamples = samples.length;
@@ -6411,6 +6450,75 @@ var VoiceModeTtsHub = class {
       return this.lastUsesSystemTts;
     }
     return settings.defaultVoice.engine === "system";
+  }
+  /**
+   * Synthesize utterances without playing and merge WAV-capable output into one file.
+   * Non-WAV engines (system text / MP3 providers) are skipped and reported.
+   */
+  async exportUtterances(utterances) {
+    const chunks = [];
+    let sampleRate = 0;
+    let skipped = 0;
+    const exportedKeys = [];
+    for (const utterance of utterances) {
+      const envelope = JSON.stringify({
+        seq: ++this.seq,
+        role: utterance.role,
+        speaker: utterance.speaker,
+        ...utterance.avatar ? { avatar: utterance.avatar } : {},
+        text: utterance.text
+      });
+      exportedKeys.push(envelope);
+      let result = null;
+      try {
+        result = await this.synthesizeEnvelope(envelope, new AbortController().signal);
+      } catch {
+        skipped += 1;
+        continue;
+      }
+      if (!result || result.mime !== "audio/wav") {
+        skipped += 1;
+        continue;
+      }
+      const decoded = decodeMonoPcm16Wav(result.audio);
+      if (!decoded) {
+        skipped += 1;
+        continue;
+      }
+      if (sampleRate === 0) {
+        sampleRate = decoded.sampleRate;
+      }
+      if (decoded.sampleRate !== sampleRate) {
+        skipped += 1;
+        continue;
+      }
+      chunks.push(decoded.samples);
+    }
+    for (const key of exportedKeys) {
+      this.pendingInfo.delete(key);
+    }
+    if (chunks.length === 0) {
+      return {
+        wav: null,
+        sampleRate,
+        sentences: 0,
+        skipped,
+        reason: skipped > 0 ? "no-wav-engine" : "empty"
+      };
+    }
+    const totalSamples = chunks.reduce((sum, chunk) => sum + chunk.length, 0);
+    const merged = new Float32Array(totalSamples);
+    let offset = 0;
+    for (const chunk of chunks) {
+      merged.set(chunk, offset);
+      offset += chunk.length;
+    }
+    return {
+      wav: encodeMonoPcm16Wav(merged, sampleRate),
+      sampleRate,
+      sentences: chunks.length,
+      skipped
+    };
   }
   enqueueUtterance(utterance) {
     const settings = this.options.getSettings();

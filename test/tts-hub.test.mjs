@@ -1,7 +1,7 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 
-import { encodeMonoPcm16Wav } from "@voice-mode/core";
+import { decodeMonoPcm16Wav, encodeMonoPcm16Wav } from "@voice-mode/core";
 import { ensureExtensionSettings } from "../src/settings.ts";
 import {
   BrowserAudioSink,
@@ -274,4 +274,55 @@ test("VoiceModeTtsHub forwards raw emotion tags to kokoro-daemon, executes mid-s
   } finally {
     globalThis.Audio = prevAudio;
   }
+});
+
+
+test("VoiceModeTtsHub exports WAV utterances into one merged file (P4 parity)", async () => {
+  const settings = ensureExtensionSettings({
+    voice_mode: {
+      enabled: true,
+      defaultVoice: { engine: "openai-compat", voice: "alloy" },
+      openaiTtsPresetId: "openai",
+      openaiTtsBaseUrl: "https://api.example.test/v1",
+    },
+  });
+  const wav = makeSineWavBytes(60);
+  const hub = new VoiceModeTtsHub({
+    getSettings: () => settings,
+    getSecret: async () => "sk-test-1234567890abcdef",
+    fetchImpl: async () =>
+      new Response(wav, { status: 200, headers: { "content-type": "audio/wav" } }),
+    sink: { async play() {} },
+  });
+
+  const result = await hub.exportUtterances([
+    { role: "character", speaker: "Alice", text: "Hello." },
+    { role: "character", speaker: "Alice", text: "World." },
+  ]);
+
+  assert.equal(result.sentences, 2);
+  assert.equal(result.skipped, 0);
+  assert.equal(result.sampleRate, 16000);
+  assert.ok(result.wav, "export must produce a WAV");
+  const decoded = decodeMonoPcm16Wav(result.wav);
+  assert.ok(decoded);
+  assert.equal(decoded.samples.length, 2 * Math.floor((16000 * 60) / 1000));
+  await hub.dispose();
+});
+
+test("VoiceModeTtsHub export reports no-wav-engine when the route produces text", async () => {
+  const settings = ensureExtensionSettings({
+    voice_mode: { enabled: true, defaultVoice: { engine: "system", voice: "DefaultSys" } },
+  });
+  const hub = new VoiceModeTtsHub({
+    getSettings: () => settings,
+    getSecret: async () => null,
+    sink: { async play() {} },
+  });
+  const result = await hub.exportUtterances([
+    { role: "character", speaker: "Alice", text: "Hello." },
+  ]);
+  assert.equal(result.wav, null);
+  assert.equal(result.reason, "no-wav-engine");
+  await hub.dispose();
 });
