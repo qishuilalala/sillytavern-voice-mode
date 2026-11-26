@@ -4,12 +4,24 @@ All notable changes to `sillytavern-voice-mode` are documented in this file.
 
 ## [0.1.0] - 2026-11-22
 
+### Fixed
+
+- Group chats now resolve the speaking member from the generated message (`name` / `original_avatar`), so Voice Map matches the character instead of falling back to the group name.
+- Interrupting playback no longer re-plays the truncated message: one `CHARACTER_MESSAGE_RENDERED` after a stop is suppressed.
+- API keys saved server-side become readable again after a page reload: an indeterminate `canViewSecrets` probe is retried instead of being cached as "cannot view".
+
 ### Changed
+
+- `auto_update` is disabled so a pushed commit cannot silently change behaviour for installed users; updates are manual and documented in the README.
+- The daemon-offline fallback notice now says the voice may change.
+
 
 - The extension settings and microphone status follow SillyTavern’s interface language, including Simplified Chinese. With the browser recognizer on automatic language selection, dictation uses the browser’s normal language selection. The microphone returns to idle after a permission error and keeps the recovery instructions visible.
 
 ### Added
 
+- **Expression capability disclosure (E1)**: README lists per-engine expression support (voices/rate/pause/whisper/emotion) from `@voice-mode/core`'s capability contract.
+- **Scoped expression tags (E2)**: `<slow>`, `<fast>`, `<spell>`, `<volume N>`, `<pitch N>` and `<emotion:NAME>` are parsed and forwarded to instruction-capable engines.
 - **Streaming First-Sentence TTS (`STREAM_TOKEN_RECEIVED`)**: Cumulative-to-delta token slicer backed by `@voice-mode/core` `SentenceSegmenter` with `GENERATION_ENDED` tail flush and non-streaming `CHARACTER_MESSAGE_RENDERED` fallback.
 - **Multi-Character Voice Map & Narration Split**: Solo and group chat speaker routing (`avatar` / `name` / card `extensions.voice_mode` / `defaultVoice`) plus `*narration*` vs dialogue role separation preserving `**bold**` Markdown.
 - **Multi-Engine TTS Hub**: Zero-config browser `system` TTS, local `kokoro-daemon` (`DaemonClient`, 103 Kokoro voices with `< 1s` offline fallback), `OpenAiCompatTtsEngine`, and `MimoTtsEngine` serialized through `@voice-mode/browser` `PlaybackQueue`.
