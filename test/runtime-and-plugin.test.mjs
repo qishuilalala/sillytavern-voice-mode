@@ -700,3 +700,18 @@ test("Export chat end-to-end through a mocked daemon reports the exported senten
     await runtime.dispose();
   }
 });
+
+
+test("Settings drawer shows a zero-config quick-start hint", async () => {
+  const { doc, runtime } = createDrawerFixture({
+    translate: (fallback, key) => chineseCatalog[key] || fallback,
+  });
+  try {
+    await runtime.activate();
+    const hint = doc.getElementById("vm_st_quickstart");
+    assert.ok(hint, "quick-start hint should be rendered");
+    assert.match(hint.textContent, /零配置/);
+  } finally {
+    await runtime.dispose();
+  }
+});

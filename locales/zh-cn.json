@@ -68,5 +68,6 @@
   "voice_mode.copy_diagnostics": "复制诊断信息",
   "voice_mode.diagnostics_copied": "诊断信息已复制到剪贴板。",
   "voice_mode.diagnostics_copy_failed": "无法复制诊断信息（剪贴板不可用）。",
-  "voice_mode.export_chat": "导出最近 10 条回复为 WAV"
+  "voice_mode.export_chat": "导出最近 10 条回复为 WAV",
+  "voice_mode.quickstart": "快速开始：勾选流式朗读即可零配置使用；Alt+Shift+V 开始听写，Alt+Shift+B 停止/打断朗读。本地音色需可选的 Voice Mode Daemon；云端音色需配置 API 密钥（见 README）。"
 }
