@@ -8,7 +8,7 @@
   "author": "qishuilalala",
   "version": "0.1.0",
   "homePage": "https://github.com/qishuilalala/sillytavern-voice-mode",
-  "auto_update": true,
+  "auto_update": false,
   "minimum_client_version": "1.19.1",
   "i18n": {
     "zh-cn": "locales/zh-cn.json"

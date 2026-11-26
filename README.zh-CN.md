@@ -39,6 +39,8 @@ Voice Mode 会在角色生成回复时按句朗读，也能把你说的话转成
 | **进阶 · 本机守护进程** | 从源码构建运行 [Voice Mode Daemon](https://github.com/qishuilalala/voice-mode-daemon)（开发者可选后端） | 103 款 Kokoro 音色；`<whisper>`/`<break Nms>` 情感韵律；本地 `Zipformer2`/`SenseVoice` 听写；免提 AEC3 打断。 | 需要 Node.js + pnpm 构建 + 模型下载；守护进程不随商店分发。 |
 | **进阶 · 自备云端密钥** | 配置 OpenAI 兼容或 MiMo 端点并保存密钥 | 云端 TTS/ASR 音质，无需下载本地模型。 | 需要 API Key；朗读文本或听写音频会发往所选服务商。 |
 
+**更新需手动。** 已关闭 `auto_update`，避免 main 分支的任意提交悄悄改变已装用户的行为；升级前先看 [CHANGELOG.md](./CHANGELOG.md)，再从同一 Git URL 重新安装（或手动拉取）。
+
 情感标签仅在支持它的引擎上生效；在 `system` 引擎上标签会被剥离，不会被念出来。
 
 ### 各引擎表达力能力

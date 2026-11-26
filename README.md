@@ -37,6 +37,8 @@ The extension works immediately with zero configuration, but the advertised feat
 | **Advanced · local daemon** | Run [Voice Mode Daemon](https://github.com/qishuilalala/voice-mode-daemon) from source (developer-only backend) | 103 Kokoro voices, `<whisper>`/`<break Nms>` emotion prosody, local `Zipformer2`/`SenseVoice` dictation, hands-free AEC3 barge-in. | Requires Node.js + pnpm build + model download; the daemon is not distributed as a store package. |
 | **Advanced · BYOK cloud** | Configure an OpenAI-compatible or MiMo endpoint and save the key | Cloud TTS/ASR quality without local model downloads. | Needs an API key; speakable text or utterance audio leaves the machine to the chosen provider. |
 
+**Updates are manual.** `auto_update` is disabled so a pushed commit cannot silently change behavior for installed users; update by reinstalling the extension from the same Git URL (or pulling it manually) after checking [CHANGELOG.md](./CHANGELOG.md).
+
 Emotion tags are only audible on engines that support them; on the `system` engine they are stripped from the speech rather than read aloud.
 
 ### Engine expression capabilities
