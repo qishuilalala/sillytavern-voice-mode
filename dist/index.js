@@ -744,7 +744,19 @@ function createAsrReplacer(rules, onHit) {
 }
 
 // node_modules/.pnpm/@voice-mode+core@file+vendor+voice-mode-core-0.1.0.tgz/node_modules/@voice-mode/core/dist/emotion.js
-var EMOTION_TAG_PATTERN = "<\\s*(break\\s+(?<ms>\\d+)\\s*ms|whisper|\\/whisper|laugh|sigh|emphasis)\\s*>";
+var EMOTION_NAMES = [
+  "neutral",
+  "gentle",
+  "happy",
+  "sad",
+  "angry",
+  "excited",
+  "tender",
+  "serious",
+  "playful",
+  "nervous"
+];
+var EMOTION_TAG_PATTERN = "<\\s*(break\\s+(?<ms>\\d+)\\s*ms|whisper|\\/whisper|slow|\\/slow|fast|\\/fast|spell|\\/spell|volume\\s+(?<volume>\\d+(?:\\.\\d+)?)|\\/volume|pitch\\s+(?<pitch>-?\\d+)|\\/pitch|emotion\\s*:\\s*(?<emotion>[a-z][a-z_-]*)|\\/emotion|laugh|sigh|emphasis)\\s*>";
 var TAG_RE = new RegExp(EMOTION_TAG_PATTERN, "gi");
 var STRIP_RE = new RegExp(EMOTION_TAG_PATTERN, "gi");
 var MAX_BREAK_MS = 5e3;
@@ -757,6 +769,12 @@ function parseEmotionTags(raw) {
   const out = [];
   let buf = "";
   let whisper = false;
+  let slow = false;
+  let fast = false;
+  let spell = false;
+  let volume;
+  let pitch;
+  let emotion;
   let pendingBreakMs = 0;
   let totalBreakMs = 0;
   let sawInlineTag = false;
@@ -775,8 +793,23 @@ function parseEmotionTags(raw) {
     sawInlineTag = false;
     if (text.length === 0)
       return;
-    out.push({ text, whisper });
+    const seg = { text, whisper };
+    if (slow)
+      seg.slow = true;
+    if (fast)
+      seg.fast = true;
+    if (spell)
+      seg.spell = true;
+    if (volume !== void 0)
+      seg.volume = volume;
+    if (pitch !== void 0)
+      seg.pitch = pitch;
+    if (emotion)
+      seg.emotion = emotion;
+    out.push(seg);
   };
+  const clampVolume = (value) => Math.min(2, Math.max(0, value));
+  const clampPitch = (value) => Math.min(12, Math.max(-12, value));
   let lastEnd = 0;
   for (const m of input.matchAll(TAG_RE)) {
     const idx = m.index ?? 0;
@@ -797,9 +830,8 @@ function parseEmotionTags(raw) {
         continue;
       }
       totalBreakMs += ms;
-      if (buf.trim().length > 0) {
+      if (buf.trim().length > 0)
         flush();
-      }
       const last = out[out.length - 1];
       if (last) {
         last.preBreakMs = (last.preBreakMs ?? 0) + ms;
@@ -812,6 +844,55 @@ function parseEmotionTags(raw) {
     } else if (tag === "/whisper") {
       flush();
       whisper = false;
+    } else if (tag === "slow") {
+      flush();
+      slow = true;
+      fast = false;
+    } else if (tag === "/slow") {
+      flush();
+      slow = false;
+    } else if (tag === "fast") {
+      flush();
+      fast = true;
+      slow = false;
+    } else if (tag === "/fast") {
+      flush();
+      fast = false;
+    } else if (tag === "spell") {
+      flush();
+      spell = true;
+    } else if (tag === "/spell") {
+      flush();
+      spell = false;
+    } else if (tag.startsWith("volume")) {
+      const raw2 = Number(m.groups?.volume ?? NaN);
+      if (!Number.isFinite(raw2)) {
+        sawInlineTag = true;
+        continue;
+      }
+      flush();
+      volume = clampVolume(raw2);
+    } else if (tag === "/volume") {
+      flush();
+      volume = void 0;
+    } else if (tag.startsWith("pitch")) {
+      const raw2 = Number(m.groups?.pitch ?? NaN);
+      if (!Number.isFinite(raw2)) {
+        sawInlineTag = true;
+        continue;
+      }
+      flush();
+      pitch = clampPitch(raw2);
+    } else if (tag === "/pitch") {
+      flush();
+      pitch = void 0;
+    } else if (tag.startsWith("emotion")) {
+      const name = (m.groups?.emotion ?? "").toLowerCase();
+      flush();
+      emotion = EMOTION_NAMES.includes(name) ? name : void 0;
+    } else if (tag === "/emotion") {
+      flush();
+      emotion = void 0;
     } else {
       sawInlineTag = true;
     }
@@ -825,10 +906,27 @@ function parseEmotionTags(raw) {
     }
     pendingBreakMs = 0;
   }
-  if (whisper) {
+  if (whisper)
     for (const seg of out)
       seg.whisper = false;
-  }
+  if (slow)
+    for (const seg of out)
+      delete seg.slow;
+  if (fast)
+    for (const seg of out)
+      delete seg.fast;
+  if (spell)
+    for (const seg of out)
+      delete seg.spell;
+  if (volume !== void 0)
+    for (const seg of out)
+      delete seg.volume;
+  if (pitch !== void 0)
+    for (const seg of out)
+      delete seg.pitch;
+  if (emotion)
+    for (const seg of out)
+      delete seg.emotion;
   return out;
 }
 var DEFAULT_PROMPT_MAX_BREAK_MS = 1500;
@@ -851,6 +949,7 @@ function buildEmotionPromptInstruction(options = {}) {
   }
   if (allowWhisper || allowBreaks) {
     parts.push("Use inline cues (<laugh>, <sigh>, <emphasis>) sparingly; never invent unsupported tags.");
+    parts.push("Optional scoped cues: <slow>...</slow>, <fast>...</fast>, <spell>...</spell>, <volume 0.5>...</volume>, <pitch -2>...</pitch>, <emotion:gentle>...</emotion>; always close them.");
   }
   return parts.join(" ");
 }
@@ -883,6 +982,27 @@ function compileEmotionPlan(raw, mode) {
   }
   if (segments.some((seg) => (seg.preBreakMs ?? 0) > 0)) {
     hints.push("leave natural measured pauses between thoughts");
+  }
+  if (segments.some((seg) => seg.slow)) {
+    hints.push("slow the delivery for marked phrases");
+  }
+  if (segments.some((seg) => seg.fast)) {
+    hints.push("quicken the pace for marked phrases");
+  }
+  if (segments.some((seg) => seg.spell)) {
+    hints.push("spell out marked words letter by letter");
+  }
+  if (segments.some((seg) => seg.volume !== void 0)) {
+    hints.push("adjust vocal loudness where marked");
+  }
+  if (segments.some((seg) => seg.pitch !== void 0)) {
+    hints.push("shift pitch where marked");
+  }
+  const emotionNames = [
+    ...new Set(segments.map((seg) => seg.emotion).filter((name) => !!name))
+  ];
+  if (emotionNames.length > 0) {
+    hints.push(`convey the marked emotion (${emotionNames.join(", ")})`);
   }
   const inlineSet = /* @__PURE__ */ new Set();
   for (const match of input.matchAll(INLINE_CUE_RE)) {
