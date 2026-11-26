@@ -372,3 +372,43 @@ test("VoiceModeTtsHub exports WAV through the real kokoro-daemon request path", 
   assert.equal(decoded.samples.length, 2 * Math.floor((24000 * 30) / 1000));
   await hub.dispose();
 });
+
+test("VoiceModeTtsHub synthesizes and exports through the MiMo chat-completions branch (D10)", async () => {
+  const wav = makeSineWavBytes(60, 24000);
+  const settings = ensureExtensionSettings({
+    voice_mode: {
+      enabled: true,
+      defaultVoice: { engine: "mimo", voice: "mimo_default" },
+      mimoBaseUrl: "https://api.example.test/v1",
+      mimoModel: "mimo-tts",
+    },
+  });
+  const requests = [];
+  const hub = new VoiceModeTtsHub({
+    getSettings: () => settings,
+    getSecret: async (slot) => (slot === "mimo" ? "sk-mimo-test-123456" : null),
+    fetchImpl: async (url, init) => {
+      requests.push({ url: String(url), body: JSON.parse(String(init?.body ?? "{}")) });
+      return new Response(
+        JSON.stringify({
+          choices: [{ message: { audio: { data: Buffer.from(wav).toString("base64") } } }],
+        }),
+        { status: 200, headers: { "content-type": "application/json" } },
+      );
+    },
+    sink: { async play() {} },
+  });
+
+  const result = await hub.exportUtterances([
+    { role: "character", speaker: "Alice", text: "Hello." },
+  ]);
+
+  assert.equal(result.sentences, 1);
+  assert.equal(result.skipped, 0);
+  assert.ok(result.wav, "MiMo export must produce a WAV");
+  assert.equal(requests.length, 1);
+  assert.ok(requests[0].url.endsWith("/chat/completions"));
+  assert.equal(requests[0].body.audio.format, "wav");
+  assert.equal(requests[0].body.stream, false);
+  await hub.dispose();
+});
