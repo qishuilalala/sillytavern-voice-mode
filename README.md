@@ -1,5 +1,7 @@
 # Voice Mode（SillyTavern 语音模式扩展）
 
+[![CI](https://github.com/qishuilalala/sillytavern-voice-mode/actions/workflows/ci.yml/badge.svg?branch=main)](https://github.com/qishuilalala/sillytavern-voice-mode/actions/workflows/ci.yml) [![License: MIT](https://img.shields.io/github/license/qishuilalala/sillytavern-voice-mode?style=flat-square)](LICENSE)
+
 [English](./README.en.md) · [安全策略](./SECURITY.md) · [领域词典](./GLOSSARY.md) · [更新日志](./CHANGELOG.md)
 
 > **源码构建（`0.1.0`）** · 正式发布 tag 尚未创建；请通过仓库地址安装（扩展以 `auto_update: false` 版本锁定）。
