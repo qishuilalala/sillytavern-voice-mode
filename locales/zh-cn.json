@@ -13,7 +13,7 @@
   "voice_mode.barge_mode": "语音打断模式",
   "voice_mode.character": "角色",
   "voice_mode.character_voice_override": "当前角色的音色 ID",
-  "voice_mode.daemon_fallback": "本地语音服务离线，已切换到浏览器系统语音",
+  "voice_mode.daemon_fallback": "本地语音服务离线，已切换到浏览器系统语音（音色可能变化）",
   "voice_mode.daemon_url": "本地 Voice Daemon 地址",
   "voice_mode.default_voice": "默认角色音色",
   "voice_mode.dictate": "开始听写",

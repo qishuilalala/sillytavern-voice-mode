@@ -7252,7 +7252,7 @@ function createVoiceModeRuntime(host) {
         reason,
         secretBroker.knownSecretsSnapshot()
       );
-      refreshStatusText(text("daemon_fallback", "Daemon offline -> System TTS fallback"));
+      refreshStatusText(text("daemon_fallback", "Daemon offline -> System TTS fallback (voice may change)"));
     },
     onError: (err) => {
       lastError = formatSafeError(err, secretBroker.knownSecretsSnapshot());
