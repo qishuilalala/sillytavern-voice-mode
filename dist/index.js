@@ -3383,304 +3383,6 @@ function formatSafeError(err, knownSecrets = []) {
   return safe.slice(0, 280);
 }
 
-// src/stream-router.ts
-function getRenderedMessageText(message) {
-  const displayText = message.extra?.display_text;
-  if (typeof displayText === "string" && displayText.trim()) return displayText;
-  return typeof message.mes === "string" ? message.mes : "";
-}
-function commonPrefixLength(a, b) {
-  const limit = Math.min(a.length, b.length);
-  let i = 0;
-  while (i < limit && a.charCodeAt(i) === b.charCodeAt(i)) {
-    i++;
-  }
-  return i;
-}
-function cleanOuterQuotes(text) {
-  return text.replace(/^["“”「」『』\s]+|["“”「」『』\s]+$/g, "").trim();
-}
-function splitTerminalWhisperBoundaries(raw) {
-  const out = [];
-  const re = /([.!?。！？]["'”’)]?\s*<\s*\/whisper\s*>)\s+/gi;
-  let last = 0;
-  for (const m of raw.matchAll(re)) {
-    const idx = m.index ?? 0;
-    const endOfClose = idx + (m[1]?.length ?? 0);
-    const head = raw.slice(last, endOfClose).trim();
-    if (head) out.push(head);
-    last = idx + m[0].length;
-  }
-  const tail = raw.slice(last).trim();
-  if (tail) out.push(tail);
-  return out;
-}
-var StreamingUtteranceRouter = class {
-  narrationSplitEnabled;
-  segmenterOptions;
-  resolveActiveSpeaker;
-  onUtterance;
-  segmenter;
-  armed = false;
-  ignoredTurn = false;
-  streamSawTokens = false;
-  handledLastGenerationByStream = false;
-  // Set when a generation is interrupted: the host may still render the truncated
-  // message, and re-ingesting it would replay cancelled text. Deliberately not
-  // cleared by reset(); cleared by the next onGenerationStarted/onChatChanged.
-  suppressNextRendered = false;
-  prevCumulativeText = "";
-  activeSpeaker = "";
-  activeAvatar = void 0;
-  inNarration = false;
-  pendingStar = false;
-  inOpenWhisper = false;
-  constructor(options = {}) {
-    this.narrationSplitEnabled = options.narrationSplitEnabled ?? true;
-    this.segmenterOptions = options.segmenterOptions;
-    this.resolveActiveSpeaker = options.resolveActiveSpeaker;
-    this.onUtterance = options.onUtterance;
-    this.segmenter = new SentenceSegmenter(this.segmenterOptions);
-  }
-  setNarrationSplitEnabled(enabled) {
-    this.narrationSplitEnabled = enabled;
-  }
-  onGenerationStarted(input = {}) {
-    this.suppressNextRendered = false;
-    const type = input.type ?? "normal";
-    if (input.dryRun === true || type === "quiet" || type === "impersonate") {
-      this.reset();
-      this.ignoredTurn = true;
-      return;
-    }
-    this.reset();
-    const fallback = this.resolveActiveSpeaker?.();
-    this.activeSpeaker = input.speaker ?? fallback?.speaker ?? "";
-    this.activeAvatar = input.avatar ?? fallback?.avatar;
-    this.armed = true;
-  }
-  onStreamToken(cumulativeText) {
-    if (this.ignoredTurn || typeof cumulativeText !== "string" || !cumulativeText) {
-      return [];
-    }
-    if (!this.armed) {
-      const fallback = this.resolveActiveSpeaker?.();
-      this.activeSpeaker = fallback?.speaker ?? "";
-      this.activeAvatar = fallback?.avatar;
-      this.armed = true;
-    }
-    this.streamSawTokens = true;
-    let delta;
-    if (cumulativeText.startsWith(this.prevCumulativeText)) {
-      delta = cumulativeText.slice(this.prevCumulativeText.length);
-    } else {
-      const prefix = commonPrefixLength(this.prevCumulativeText, cumulativeText);
-      delta = cumulativeText.slice(prefix);
-    }
-    this.prevCumulativeText = cumulativeText;
-    if (!delta) return [];
-    return this.ingestDelta(delta, this.activeSpeaker, this.activeAvatar);
-  }
-  onGenerationEnded() {
-    if (this.ignoredTurn) {
-      this.ignoredTurn = false;
-      this.armed = false;
-      return [];
-    }
-    if (!this.armed || !this.streamSawTokens) {
-      this.armed = false;
-      return [];
-    }
-    const tail = this.flushActive(this.activeSpeaker, this.activeAvatar);
-    this.armed = false;
-    this.handledLastGenerationByStream = true;
-    return tail;
-  }
-  onGenerationStopped() {
-    this.reset();
-    this.suppressNextRendered = true;
-  }
-  onChatChanged() {
-    this.reset();
-    this.suppressNextRendered = false;
-  }
-  onCharacterMessageRendered(input) {
-    if (this.suppressNextRendered) {
-      this.suppressNextRendered = false;
-      return [];
-    }
-    if (input.type === "impersonate" || input.type === "quiet") {
-      return [];
-    }
-    const msg = input.message;
-    if (!msg || msg.is_user || msg.is_system) {
-      return [];
-    }
-    if (this.handledLastGenerationByStream) {
-      this.handledLastGenerationByStream = false;
-      return [];
-    }
-    if (this.armed && this.streamSawTokens) {
-      const tail = this.flushActive(
-        msg.name ?? this.activeSpeaker,
-        msg.original_avatar ?? this.activeAvatar
-      );
-      this.armed = false;
-      this.handledLastGenerationByStream = true;
-      return tail;
-    }
-    const displayText = getRenderedMessageText(msg);
-    if (!displayText.trim()) return [];
-    this.reset();
-    const speaker = msg.name ?? this.resolveActiveSpeaker?.().speaker ?? "";
-    const avatar = msg.original_avatar ?? this.resolveActiveSpeaker?.().avatar;
-    const out = [
-      ...this.ingestDelta(displayText, speaker, avatar),
-      ...this.flushActive(speaker, avatar)
-    ];
-    this.reset();
-    return out;
-  }
-  reset() {
-    this.armed = false;
-    this.ignoredTurn = false;
-    this.streamSawTokens = false;
-    this.handledLastGenerationByStream = false;
-    this.prevCumulativeText = "";
-    this.activeSpeaker = "";
-    this.activeAvatar = void 0;
-    this.inNarration = false;
-    this.pendingStar = false;
-    this.inOpenWhisper = false;
-    this.segmenter.flush();
-  }
-  balanceSentenceWhisper(raw) {
-    const seeded = this.inOpenWhisper ? `<whisper>${raw}` : raw;
-    let depth = 0;
-    let rebuilt = "";
-    let lastIdx = 0;
-    const tagRe = /<\s*(\/?)\s*whisper\s*>/gi;
-    for (const match of seeded.matchAll(tagRe)) {
-      const idx = match.index ?? 0;
-      rebuilt += seeded.slice(lastIdx, idx);
-      lastIdx = idx + match[0].length;
-      const isClosing = match[1] === "/";
-      if (!isClosing) {
-        if (depth === 0) rebuilt += "<whisper>";
-        depth++;
-      } else if (depth > 0) {
-        depth--;
-        if (depth === 0) rebuilt += "</whisper>";
-      }
-    }
-    rebuilt += seeded.slice(lastIdx);
-    if (depth > 0) {
-      rebuilt += "</whisper>";
-      this.inOpenWhisper = true;
-    } else {
-      this.inOpenWhisper = false;
-    }
-    const collapsed = rebuilt.replace(/<\s*whisper\s*>\s*<\s*\/whisper\s*>/gi, "").trim();
-    const textWithoutWhisper = collapsed.replace(/<\s*\/?\s*whisper\s*>/gi, "").trim();
-    return textWithoutWhisper ? collapsed : "";
-  }
-  currentRole() {
-    return this.narrationSplitEnabled && this.inNarration ? "narrator" : "character";
-  }
-  emitSentences(sentences, role, speaker, avatar, out) {
-    for (const rawSentence of sentences) {
-      for (const raw of splitTerminalWhisperBoundaries(rawSentence)) {
-        const preCleaned = role === "character" ? cleanOuterQuotes(raw) : raw.trim();
-        const cleaned = this.balanceSentenceWhisper(preCleaned);
-        if (!cleaned) continue;
-        const utterance = {
-          role,
-          speaker,
-          ...avatar ? { avatar } : {},
-          text: cleaned
-        };
-        out.push(utterance);
-        this.onUtterance?.(utterance);
-      }
-    }
-  }
-  ingestDelta(delta, speaker, avatar) {
-    const out = [];
-    if (!this.narrationSplitEnabled) {
-      this.emitSentences(this.segmenter.feed(delta), "character", speaker, avatar, out);
-      return out;
-    }
-    const work = this.pendingStar ? `*${delta}` : delta;
-    this.pendingStar = false;
-    let buf = "";
-    let i = 0;
-    while (i < work.length) {
-      if (work[i] === "*") {
-        if (i === work.length - 1) {
-          if (buf) {
-            this.emitSentences(
-              this.segmenter.feed(buf),
-              this.currentRole(),
-              speaker,
-              avatar,
-              out
-            );
-            buf = "";
-          }
-          this.pendingStar = true;
-          i++;
-          continue;
-        }
-        if (work[i + 1] === "*") {
-          let runEnd = i + 2;
-          while (runEnd < work.length && work[runEnd] === "*") {
-            runEnd++;
-          }
-          buf += work.slice(i, runEnd);
-          i = runEnd;
-          continue;
-        }
-        const roleBefore = this.currentRole();
-        if (buf) {
-          this.emitSentences(this.segmenter.feed(buf), roleBefore, speaker, avatar, out);
-          buf = "";
-        }
-        this.emitSentences(this.segmenter.flush(), roleBefore, speaker, avatar, out);
-        this.inOpenWhisper = false;
-        this.inNarration = !this.inNarration;
-        i++;
-        continue;
-      }
-      buf += work[i];
-      i++;
-    }
-    if (buf) {
-      this.emitSentences(
-        this.segmenter.feed(buf),
-        this.currentRole(),
-        speaker,
-        avatar,
-        out
-      );
-    }
-    return out;
-  }
-  flushActive(speaker, avatar) {
-    const out = [];
-    const role = this.currentRole();
-    if (this.pendingStar) {
-      this.pendingStar = false;
-      this.emitSentences(this.segmenter.flush(), role, speaker, avatar, out);
-      this.inNarration = false;
-      return out;
-    }
-    this.emitSentences(this.segmenter.flush(), role, speaker, avatar, out);
-    this.inNarration = false;
-    this.inOpenWhisper = false;
-    return out;
-  }
-};
-
 // node_modules/.pnpm/@voice-mode+browser@file+vendor+voice-mode-browser-0.1.0.tgz/node_modules/@voice-mode/browser/dist/resample.js
 var TARGET_SAMPLE_RATE = 16e3;
 
@@ -5269,6 +4971,26 @@ var AecBargeInMonitor = class {
     }
   }
 };
+function createBargeInGuard(options) {
+  let targetArmed = false;
+  return {
+    update(engineIsSystem) {
+      const wantArmed = options.shouldArm(engineIsSystem);
+      if (wantArmed === targetArmed)
+        return;
+      targetArmed = wantArmed;
+      if (wantArmed)
+        options.arm();
+      else
+        options.disarm();
+    },
+    reset() {
+      if (targetArmed)
+        options.disarm();
+      targetArmed = false;
+    }
+  };
+}
 
 // node_modules/.pnpm/@voice-mode+browser@file+vendor+voice-mode-browser-0.1.0.tgz/node_modules/@voice-mode/browser/dist/cloud-dictation-session.js
 var DEFAULT_CLOUD_SPEECH_RMS_THRESHOLD = 8e-3;
@@ -6428,6 +6150,304 @@ var DuplexProtocol = class {
   }
 };
 
+// src/stream-router.ts
+function getRenderedMessageText(message) {
+  const displayText = message.extra?.display_text;
+  if (typeof displayText === "string" && displayText.trim()) return displayText;
+  return typeof message.mes === "string" ? message.mes : "";
+}
+function commonPrefixLength(a, b) {
+  const limit = Math.min(a.length, b.length);
+  let i = 0;
+  while (i < limit && a.charCodeAt(i) === b.charCodeAt(i)) {
+    i++;
+  }
+  return i;
+}
+function cleanOuterQuotes(text) {
+  return text.replace(/^["“”「」『』\s]+|["“”「」『』\s]+$/g, "").trim();
+}
+function splitTerminalWhisperBoundaries(raw) {
+  const out = [];
+  const re = /([.!?。！？]["'”’)]?\s*<\s*\/whisper\s*>)\s+/gi;
+  let last = 0;
+  for (const m of raw.matchAll(re)) {
+    const idx = m.index ?? 0;
+    const endOfClose = idx + (m[1]?.length ?? 0);
+    const head = raw.slice(last, endOfClose).trim();
+    if (head) out.push(head);
+    last = idx + m[0].length;
+  }
+  const tail = raw.slice(last).trim();
+  if (tail) out.push(tail);
+  return out;
+}
+var StreamingUtteranceRouter = class {
+  narrationSplitEnabled;
+  segmenterOptions;
+  resolveActiveSpeaker;
+  onUtterance;
+  segmenter;
+  armed = false;
+  ignoredTurn = false;
+  streamSawTokens = false;
+  handledLastGenerationByStream = false;
+  // Set when a generation is interrupted: the host may still render the truncated
+  // message, and re-ingesting it would replay cancelled text. Deliberately not
+  // cleared by reset(); cleared by the next onGenerationStarted/onChatChanged.
+  suppressNextRendered = false;
+  prevCumulativeText = "";
+  activeSpeaker = "";
+  activeAvatar = void 0;
+  inNarration = false;
+  pendingStar = false;
+  inOpenWhisper = false;
+  constructor(options = {}) {
+    this.narrationSplitEnabled = options.narrationSplitEnabled ?? true;
+    this.segmenterOptions = options.segmenterOptions;
+    this.resolveActiveSpeaker = options.resolveActiveSpeaker;
+    this.onUtterance = options.onUtterance;
+    this.segmenter = new SentenceSegmenter(this.segmenterOptions);
+  }
+  setNarrationSplitEnabled(enabled) {
+    this.narrationSplitEnabled = enabled;
+  }
+  onGenerationStarted(input = {}) {
+    this.suppressNextRendered = false;
+    const type = input.type ?? "normal";
+    if (input.dryRun === true || type === "quiet" || type === "impersonate") {
+      this.reset();
+      this.ignoredTurn = true;
+      return;
+    }
+    this.reset();
+    const fallback = this.resolveActiveSpeaker?.();
+    this.activeSpeaker = input.speaker ?? fallback?.speaker ?? "";
+    this.activeAvatar = input.avatar ?? fallback?.avatar;
+    this.armed = true;
+  }
+  onStreamToken(cumulativeText) {
+    if (this.ignoredTurn || typeof cumulativeText !== "string" || !cumulativeText) {
+      return [];
+    }
+    if (!this.armed) {
+      const fallback = this.resolveActiveSpeaker?.();
+      this.activeSpeaker = fallback?.speaker ?? "";
+      this.activeAvatar = fallback?.avatar;
+      this.armed = true;
+    }
+    this.streamSawTokens = true;
+    let delta;
+    if (cumulativeText.startsWith(this.prevCumulativeText)) {
+      delta = cumulativeText.slice(this.prevCumulativeText.length);
+    } else {
+      const prefix = commonPrefixLength(this.prevCumulativeText, cumulativeText);
+      delta = cumulativeText.slice(prefix);
+    }
+    this.prevCumulativeText = cumulativeText;
+    if (!delta) return [];
+    return this.ingestDelta(delta, this.activeSpeaker, this.activeAvatar);
+  }
+  onGenerationEnded() {
+    if (this.ignoredTurn) {
+      this.ignoredTurn = false;
+      this.armed = false;
+      return [];
+    }
+    if (!this.armed || !this.streamSawTokens) {
+      this.armed = false;
+      return [];
+    }
+    const tail = this.flushActive(this.activeSpeaker, this.activeAvatar);
+    this.armed = false;
+    this.handledLastGenerationByStream = true;
+    return tail;
+  }
+  onGenerationStopped() {
+    this.reset();
+    this.suppressNextRendered = true;
+  }
+  onChatChanged() {
+    this.reset();
+    this.suppressNextRendered = false;
+  }
+  onCharacterMessageRendered(input) {
+    if (this.suppressNextRendered) {
+      this.suppressNextRendered = false;
+      return [];
+    }
+    if (input.type === "impersonate" || input.type === "quiet") {
+      return [];
+    }
+    const msg = input.message;
+    if (!msg || msg.is_user || msg.is_system) {
+      return [];
+    }
+    if (this.handledLastGenerationByStream) {
+      this.handledLastGenerationByStream = false;
+      return [];
+    }
+    if (this.armed && this.streamSawTokens) {
+      const tail = this.flushActive(
+        msg.name ?? this.activeSpeaker,
+        msg.original_avatar ?? this.activeAvatar
+      );
+      this.armed = false;
+      this.handledLastGenerationByStream = true;
+      return tail;
+    }
+    const displayText = getRenderedMessageText(msg);
+    if (!displayText.trim()) return [];
+    this.reset();
+    const speaker = msg.name ?? this.resolveActiveSpeaker?.().speaker ?? "";
+    const avatar = msg.original_avatar ?? this.resolveActiveSpeaker?.().avatar;
+    const out = [
+      ...this.ingestDelta(displayText, speaker, avatar),
+      ...this.flushActive(speaker, avatar)
+    ];
+    this.reset();
+    return out;
+  }
+  reset() {
+    this.armed = false;
+    this.ignoredTurn = false;
+    this.streamSawTokens = false;
+    this.handledLastGenerationByStream = false;
+    this.prevCumulativeText = "";
+    this.activeSpeaker = "";
+    this.activeAvatar = void 0;
+    this.inNarration = false;
+    this.pendingStar = false;
+    this.inOpenWhisper = false;
+    this.segmenter.flush();
+  }
+  balanceSentenceWhisper(raw) {
+    const seeded = this.inOpenWhisper ? `<whisper>${raw}` : raw;
+    let depth = 0;
+    let rebuilt = "";
+    let lastIdx = 0;
+    const tagRe = /<\s*(\/?)\s*whisper\s*>/gi;
+    for (const match of seeded.matchAll(tagRe)) {
+      const idx = match.index ?? 0;
+      rebuilt += seeded.slice(lastIdx, idx);
+      lastIdx = idx + match[0].length;
+      const isClosing = match[1] === "/";
+      if (!isClosing) {
+        if (depth === 0) rebuilt += "<whisper>";
+        depth++;
+      } else if (depth > 0) {
+        depth--;
+        if (depth === 0) rebuilt += "</whisper>";
+      }
+    }
+    rebuilt += seeded.slice(lastIdx);
+    if (depth > 0) {
+      rebuilt += "</whisper>";
+      this.inOpenWhisper = true;
+    } else {
+      this.inOpenWhisper = false;
+    }
+    const collapsed = rebuilt.replace(/<\s*whisper\s*>\s*<\s*\/whisper\s*>/gi, "").trim();
+    const textWithoutWhisper = collapsed.replace(/<\s*\/?\s*whisper\s*>/gi, "").trim();
+    return textWithoutWhisper ? collapsed : "";
+  }
+  currentRole() {
+    return this.narrationSplitEnabled && this.inNarration ? "narrator" : "character";
+  }
+  emitSentences(sentences, role, speaker, avatar, out) {
+    for (const rawSentence of sentences) {
+      for (const raw of splitTerminalWhisperBoundaries(rawSentence)) {
+        const preCleaned = role === "character" ? cleanOuterQuotes(raw) : raw.trim();
+        const cleaned = this.balanceSentenceWhisper(preCleaned);
+        if (!cleaned) continue;
+        const utterance = {
+          role,
+          speaker,
+          ...avatar ? { avatar } : {},
+          text: cleaned
+        };
+        out.push(utterance);
+        this.onUtterance?.(utterance);
+      }
+    }
+  }
+  ingestDelta(delta, speaker, avatar) {
+    const out = [];
+    if (!this.narrationSplitEnabled) {
+      this.emitSentences(this.segmenter.feed(delta), "character", speaker, avatar, out);
+      return out;
+    }
+    const work = this.pendingStar ? `*${delta}` : delta;
+    this.pendingStar = false;
+    let buf = "";
+    let i = 0;
+    while (i < work.length) {
+      if (work[i] === "*") {
+        if (i === work.length - 1) {
+          if (buf) {
+            this.emitSentences(
+              this.segmenter.feed(buf),
+              this.currentRole(),
+              speaker,
+              avatar,
+              out
+            );
+            buf = "";
+          }
+          this.pendingStar = true;
+          i++;
+          continue;
+        }
+        if (work[i + 1] === "*") {
+          let runEnd = i + 2;
+          while (runEnd < work.length && work[runEnd] === "*") {
+            runEnd++;
+          }
+          buf += work.slice(i, runEnd);
+          i = runEnd;
+          continue;
+        }
+        const roleBefore = this.currentRole();
+        if (buf) {
+          this.emitSentences(this.segmenter.feed(buf), roleBefore, speaker, avatar, out);
+          buf = "";
+        }
+        this.emitSentences(this.segmenter.flush(), roleBefore, speaker, avatar, out);
+        this.inOpenWhisper = false;
+        this.inNarration = !this.inNarration;
+        i++;
+        continue;
+      }
+      buf += work[i];
+      i++;
+    }
+    if (buf) {
+      this.emitSentences(
+        this.segmenter.feed(buf),
+        this.currentRole(),
+        speaker,
+        avatar,
+        out
+      );
+    }
+    return out;
+  }
+  flushActive(speaker, avatar) {
+    const out = [];
+    const role = this.currentRole();
+    if (this.pendingStar) {
+      this.pendingStar = false;
+      this.emitSentences(this.segmenter.flush(), role, speaker, avatar, out);
+      this.inNarration = false;
+      return out;
+    }
+    this.emitSentences(this.segmenter.flush(), role, speaker, avatar, out);
+    this.inNarration = false;
+    this.inOpenWhisper = false;
+    return out;
+  }
+};
+
 // src/tts-hub.ts
 function resolveUtteranceVoice(utterance, settings, cardVoiceRaw) {
   if (utterance.role === "narrator" && settings.narrationSplitEnabled) {
@@ -6465,7 +6485,6 @@ var VoiceModeTtsHub = class {
   serverPluginState = null;
   pendingInfo = /* @__PURE__ */ new Map();
   seq = 0;
-  lastUsesSystemTts = true;
   constructor(options) {
     this.options = options;
     this.sink = options.sink ?? new BrowserAudioSink();
@@ -6478,7 +6497,6 @@ var VoiceModeTtsHub = class {
         this.pendingInfo.delete(envelopeStr);
         if (info) {
           info.startedAtMs = Date.now();
-          this.lastUsesSystemTts = info.engine === "system";
           this.options.onUtteranceStart?.(info);
         }
       },
@@ -6496,13 +6514,6 @@ var VoiceModeTtsHub = class {
   }
   get state() {
     return this.queue.state;
-  }
-  get usesSystemTts() {
-    const settings = this.options.getSettings();
-    if (this.queue.state === "playing") {
-      return this.lastUsesSystemTts;
-    }
-    return settings.defaultVoice.engine === "system";
   }
   /**
    * Synthesize utterances without playing and merge WAV-capable output into one file.
@@ -6551,10 +6562,7 @@ var VoiceModeTtsHub = class {
   enqueueUtterance(utterance) {
     const settings = this.options.getSettings();
     if (!settings.enabled) return false;
-    const envelope = this.createEnvelope(utterance, settings);
-    const resolved = resolveUtteranceVoice(utterance, settings, envelope.cardVoice);
-    this.lastUsesSystemTts = resolved.engine === "system";
-    return this.queue.enqueue(JSON.stringify(envelope));
+    return this.queue.enqueue(JSON.stringify(this.createEnvelope(utterance, settings)));
   }
   createEnvelope(utterance, settings) {
     const cardVoiceRaw = this.options.getCharacterCardVoice?.(
@@ -6570,6 +6578,12 @@ var VoiceModeTtsHub = class {
       text: utterance.text,
       ...cardVoice ? { cardVoice } : {}
     };
+  }
+  markSystemFallbackEngine(envelopeStr, res) {
+    if (res.mime === SYSTEM_TTS_MIME) {
+      const info = this.pendingInfo.get(envelopeStr);
+      if (info) info.engine = "system";
+    }
   }
   cancel() {
     this.pendingInfo.clear();
@@ -6714,10 +6728,7 @@ var VoiceModeTtsHub = class {
         rate: assignment.rate,
         signal
       });
-      if (res.mime === SYSTEM_TTS_MIME) {
-        const info = this.pendingInfo.get(envelopeStr);
-        if (info) info.engine = "system";
-      }
+      this.markSystemFallbackEngine(envelopeStr, res);
       return res;
     }
     if (assignment.engine === "mimo") {
@@ -6730,11 +6741,13 @@ var VoiceModeTtsHub = class {
         fallback: () => this.systemEngine,
         fetchImpl: this.buildFetchForByok(settings, "mimo", "mimo")
       });
-      return engine2.synthesize(plan.plainText, {
+      const mimoRes = await engine2.synthesize(plan.plainText, {
         voice: assignment.voice || void 0,
         rate: assignment.rate,
         signal
       });
+      this.markSystemFallbackEngine(envelopeStr, mimoRes);
+      return mimoRes;
     }
     const effectivePresetId = assignment.presetId ?? settings.openaiTtsPresetId;
     const engine = new OpenAiCompatTtsEngine({
@@ -6752,11 +6765,13 @@ var VoiceModeTtsHub = class {
         effectivePresetId === "custom" ? settings.openaiTtsBaseUrl : void 0
       )
     });
-    return engine.synthesize(plan.plainText, {
+    const compatRes = await engine.synthesize(plan.plainText, {
       voice: assignment.voice || void 0,
       rate: assignment.rate,
       signal
     });
+    this.markSystemFallbackEngine(envelopeStr, compatRes);
+    return compatRes;
   }
 };
 
@@ -7616,6 +7631,7 @@ function createVoiceModeRuntime(host) {
     fetchImpl: host.fetchImpl,
     sink: host.sink,
     onUtteranceStart: (info) => {
+      initBargeInGuard().update(info.engine === "system");
       if (turnFirstPlayStartMs === 0) {
         turnFirstPlayStartMs = info.startedAtMs;
       }
@@ -7625,14 +7641,8 @@ function createVoiceModeRuntime(host) {
       refreshStatusText(text("speaking", "Speaking ({0}: {1})", role, info.voice || info.engine));
     },
     onStateChange: (state) => {
-      if (state === "playing") {
-        const s = getSettings();
-        if (s.bargeInMode !== "manual" && !ttsHub.usesSystemTts) {
-          void io.armBargeIn({ usesSystemTts: false }).catch((err) => {
-            lastError = formatSafeError(err, secretBroker.knownSecretsSnapshot());
-          });
-        }
-      } else if (state === "idle" && !isHostGenerating()) {
+      if (state === "idle" && !isHostGenerating()) {
+        bargeInGuard?.reset();
         void io.disarmBargeIn();
         refreshStatusText(text("ready", "Ready"));
       }
@@ -7648,6 +7658,16 @@ function createVoiceModeRuntime(host) {
       lastError = formatSafeError(err, secretBroker.knownSecretsSnapshot());
       refreshStatusText(text("tts_error", "Error: {0}", lastError));
     }
+  });
+  let bargeInGuard;
+  const initBargeInGuard = () => bargeInGuard ??= createBargeInGuard({
+    shouldArm: (engineIsSystem) => !engineIsSystem && getSettings().bargeInMode !== "manual",
+    arm: () => {
+      void io.armBargeIn({ usesSystemTts: false }).catch((err) => {
+        lastError = formatSafeError(err, secretBroker.knownSecretsSnapshot());
+      });
+    },
+    disarm: () => void io.disarmBargeIn()
   });
   const router = new StreamingUtteranceRouter({
     narrationSplitEnabled: getSettings().narrationSplitEnabled,
@@ -7830,6 +7850,7 @@ function createVoiceModeRuntime(host) {
         inFlightGenerationEvent = false;
         router.onGenerationStopped();
         ttsHub.cancel();
+        bargeInGuard?.reset();
         void io.disarmBargeIn();
       });
       subscribe(
@@ -7851,6 +7872,7 @@ function createVoiceModeRuntime(host) {
         inFlightGenerationEvent = false;
         router.onChatChanged();
         ttsHub.cancel();
+        bargeInGuard?.reset();
         void io.disarmBargeIn();
         drawer?.refreshCharacter();
       };
@@ -7879,6 +7901,7 @@ function createVoiceModeRuntime(host) {
         fn();
       }
       router.reset();
+      bargeInGuard?.reset();
       await io.dispose();
       await ttsHub.dispose();
       activated = false;

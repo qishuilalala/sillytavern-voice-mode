@@ -113,7 +113,6 @@ export class VoiceModeTtsHub {
   private serverPluginState: { available: boolean; expiresAt: number } | null = null;
   private readonly pendingInfo = new Map<string, UtterancePlaybackInfo>();
   private seq = 0;
-  private lastUsesSystemTts = true;
 
   constructor(options: VoiceModeTtsHubOptions) {
     this.options = options;
@@ -127,7 +126,6 @@ export class VoiceModeTtsHub {
         this.pendingInfo.delete(envelopeStr);
         if (info) {
           info.startedAtMs = Date.now();
-          this.lastUsesSystemTts = info.engine === "system";
           this.options.onUtteranceStart?.(info);
         }
       },
@@ -146,14 +144,6 @@ export class VoiceModeTtsHub {
 
   get state(): PlaybackQueueState {
     return this.queue.state;
-  }
-
-  get usesSystemTts(): boolean {
-    const settings = this.options.getSettings();
-    if (this.queue.state === "playing") {
-      return this.lastUsesSystemTts;
-    }
-    return settings.defaultVoice.engine === "system";
   }
 
   /**
@@ -205,10 +195,7 @@ export class VoiceModeTtsHub {
   enqueueUtterance(utterance: RoutedUtterance): boolean {
     const settings = this.options.getSettings();
     if (!settings.enabled) return false;
-    const envelope = this.createEnvelope(utterance, settings);
-    const resolved = resolveUtteranceVoice(utterance, settings, envelope.cardVoice);
-    this.lastUsesSystemTts = resolved.engine === "system";
-    return this.queue.enqueue(JSON.stringify(envelope));
+    return this.queue.enqueue(JSON.stringify(this.createEnvelope(utterance, settings)));
   }
 
   private createEnvelope(
@@ -231,6 +218,13 @@ export class VoiceModeTtsHub {
       text: utterance.text,
       ...(cardVoice ? { cardVoice } : {}),
     };
+  }
+
+  private markSystemFallbackEngine(envelopeStr: string, res: TtsSynthResult): void {
+    if (res.mime === SYSTEM_TTS_MIME) {
+      const info = this.pendingInfo.get(envelopeStr);
+      if (info) info.engine = "system";
+    }
   }
 
   cancel(): void {
@@ -399,10 +393,7 @@ export class VoiceModeTtsHub {
         rate: assignment.rate,
         signal,
       });
-      if (res.mime === SYSTEM_TTS_MIME) {
-        const info = this.pendingInfo.get(envelopeStr);
-        if (info) info.engine = "system";
-      }
+      this.markSystemFallbackEngine(envelopeStr, res);
       return res;
     }
 
@@ -416,11 +407,13 @@ export class VoiceModeTtsHub {
         fallback: () => this.systemEngine,
         fetchImpl: this.buildFetchForByok(settings, "mimo", "mimo"),
       });
-      return engine.synthesize(plan.plainText, {
+      const mimoRes = await engine.synthesize(plan.plainText, {
         voice: assignment.voice || undefined,
         rate: assignment.rate,
         signal,
       });
+      this.markSystemFallbackEngine(envelopeStr, mimoRes);
+      return mimoRes;
     }
 
     const effectivePresetId = assignment.presetId ?? settings.openaiTtsPresetId;
@@ -439,10 +432,12 @@ export class VoiceModeTtsHub {
         effectivePresetId === "custom" ? settings.openaiTtsBaseUrl : undefined,
       ),
     });
-    return engine.synthesize(plan.plainText, {
+    const compatRes = await engine.synthesize(plan.plainText, {
       voice: assignment.voice || undefined,
       rate: assignment.rate,
       signal,
     });
+    this.markSystemFallbackEngine(envelopeStr, compatRes);
+    return compatRes;
   }
 }

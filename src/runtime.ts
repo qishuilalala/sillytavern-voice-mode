@@ -1,5 +1,5 @@
 import { buildEmotionPromptInstruction } from "@voice-mode/core";
-import type { AudioSink } from "@voice-mode/browser";
+import { createBargeInGuard, type AudioSink } from "@voice-mode/browser";
 import {
   EMOTION_PROMPT_KEY,
   SillyTavernSecretBroker,
@@ -229,6 +229,7 @@ export function createVoiceModeRuntime(host: SillyTavernHostBridge): VoiceModeRu
     fetchImpl: host.fetchImpl,
     sink: host.sink,
     onUtteranceStart: (info) => {
+      initBargeInGuard().update(info.engine === "system");
       if (turnFirstPlayStartMs === 0) {
         turnFirstPlayStartMs = info.startedAtMs;
       }
@@ -238,14 +239,8 @@ export function createVoiceModeRuntime(host: SillyTavernHostBridge): VoiceModeRu
       refreshStatusText(text("speaking", "Speaking ({0}: {1})", role, info.voice || info.engine));
     },
     onStateChange: (state) => {
-      if (state === "playing") {
-        const s = getSettings();
-        if (s.bargeInMode !== "manual" && !ttsHub.usesSystemTts) {
-          void io.armBargeIn({ usesSystemTts: false }).catch((err) => {
-            lastError = formatSafeError(err, secretBroker.knownSecretsSnapshot());
-          });
-        }
-      } else if (state === "idle" && !isHostGenerating()) {
+      if (state === "idle" && !isHostGenerating()) {
+        bargeInGuard?.reset();
         void io.disarmBargeIn();
         refreshStatusText(text("ready", "Ready"));
       }
@@ -262,6 +257,21 @@ export function createVoiceModeRuntime(host: SillyTavernHostBridge): VoiceModeRu
       refreshStatusText(text("tts_error", "Error: {0}", lastError));
     },
   });
+
+  // Per-utterance barge-in guard: arm/disarm strictly follows the ACTUAL playback
+  // engine (info.engine from onPlayStart), never the configured engine prediction.
+  let bargeInGuard: ReturnType<typeof createBargeInGuard> | undefined;
+  const initBargeInGuard = (): ReturnType<typeof createBargeInGuard> =>
+    (bargeInGuard ??= createBargeInGuard({
+      shouldArm: (engineIsSystem) =>
+        !engineIsSystem && getSettings().bargeInMode !== "manual",
+      arm: () => {
+        void io.armBargeIn({ usesSystemTts: false }).catch((err) => {
+          lastError = formatSafeError(err, secretBroker.knownSecretsSnapshot());
+        });
+      },
+      disarm: () => void io.disarmBargeIn(),
+    }));
 
   const router = new StreamingUtteranceRouter({
     narrationSplitEnabled: getSettings().narrationSplitEnabled,
@@ -475,6 +485,7 @@ export function createVoiceModeRuntime(host: SillyTavernHostBridge): VoiceModeRu
         inFlightGenerationEvent = false;
         router.onGenerationStopped();
         ttsHub.cancel();
+        bargeInGuard?.reset();
         void io.disarmBargeIn();
       });
       subscribe(
@@ -496,6 +507,7 @@ export function createVoiceModeRuntime(host: SillyTavernHostBridge): VoiceModeRu
         inFlightGenerationEvent = false;
         router.onChatChanged();
         ttsHub.cancel();
+        bargeInGuard?.reset();
         void io.disarmBargeIn();
         drawer?.refreshCharacter();
       };
@@ -527,6 +539,7 @@ export function createVoiceModeRuntime(host: SillyTavernHostBridge): VoiceModeRu
         fn();
       }
       router.reset();
+      bargeInGuard?.reset();
       await io.dispose();
       await ttsHub.dispose();
       activated = false;
