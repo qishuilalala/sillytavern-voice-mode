@@ -165,13 +165,7 @@ export class VoiceModeTtsHub {
     let skipped = 0;
     const exportedKeys: string[] = [];
     for (const utterance of utterances) {
-      const envelope = JSON.stringify({
-        seq: ++this.seq,
-        role: utterance.role,
-        speaker: utterance.speaker,
-        ...(utterance.avatar ? { avatar: utterance.avatar } : {}),
-        text: utterance.text,
-      });
+      const envelope = JSON.stringify(this.createEnvelope(utterance, this.options.getSettings()));
       exportedKeys.push(envelope);
       let result: TtsSynthResult | null = null;
       try {
@@ -211,6 +205,16 @@ export class VoiceModeTtsHub {
   enqueueUtterance(utterance: RoutedUtterance): boolean {
     const settings = this.options.getSettings();
     if (!settings.enabled) return false;
+    const envelope = this.createEnvelope(utterance, settings);
+    const resolved = resolveUtteranceVoice(utterance, settings, envelope.cardVoice);
+    this.lastUsesSystemTts = resolved.engine === "system";
+    return this.queue.enqueue(JSON.stringify(envelope));
+  }
+
+  private createEnvelope(
+    utterance: RoutedUtterance,
+    settings: VoiceModeExtensionSettings,
+  ): QueuedEnvelope & { seq: number } {
     const cardVoiceRaw = this.options.getCharacterCardVoice?.(
       utterance.speaker,
       utterance.avatar,
@@ -219,10 +223,7 @@ export class VoiceModeTtsHub {
       cardVoiceRaw && typeof cardVoiceRaw === "object"
         ? normalizeVoiceAssignment(cardVoiceRaw, settings.defaultVoice.engine)
         : undefined;
-    const resolved = resolveUtteranceVoice(utterance, settings, cardVoice);
-    this.lastUsesSystemTts = resolved.engine === "system";
-
-    const envelope: QueuedEnvelope & { seq: number } = {
+    return {
       seq: ++this.seq,
       role: utterance.role,
       speaker: utterance.speaker,
@@ -230,7 +231,6 @@ export class VoiceModeTtsHub {
       text: utterance.text,
       ...(cardVoice ? { cardVoice } : {}),
     };
-    return this.queue.enqueue(JSON.stringify(envelope));
   }
 
   cancel(): void {

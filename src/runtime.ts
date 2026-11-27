@@ -1,4 +1,4 @@
-import { SentenceSegmenter, buildEmotionPromptInstruction } from "@voice-mode/core";
+import { buildEmotionPromptInstruction } from "@voice-mode/core";
 import type { AudioSink } from "@voice-mode/browser";
 import {
   EMOTION_PROMPT_KEY,
@@ -11,7 +11,7 @@ import {
   type VoiceModeExtensionSettings,
   type WindowOriginLike,
 } from "./settings.ts";
-import { StreamingUtteranceRouter } from "./stream-router.ts";
+import { getRenderedMessageText, StreamingUtteranceRouter, type RoutedUtterance } from "./stream-router.ts";
 import {
   VoiceModeTtsHub,
   type UtterancePlaybackInfo,
@@ -32,6 +32,14 @@ export interface HostCharacter {
   data?: {
     extensions?: Record<string, unknown>;
   };
+}
+
+function findCharacter(characters: readonly HostCharacter[], speaker: string, avatar?: string): HostCharacter | undefined {
+  const byAvatar = avatar && characters.find((character) => character.avatar === avatar);
+  if (byAvatar) return byAvatar;
+  if (!speaker) return undefined;
+  const byName = characters.filter((character) => character.name === speaker);
+  return byName.length === 1 ? byName[0] : undefined;
 }
 
 export interface HostChatMessage {
@@ -188,11 +196,7 @@ export function createVoiceModeRuntime(host: SillyTavernHostBridge): VoiceModeRu
 
   const getCharacterCardVoice = (speaker: string, avatar?: string): unknown => {
     try {
-      const ctx = host.getContext();
-      const found = ctx.characters.find(
-        (c) => (avatar && c.avatar === avatar) || (speaker && c.name === speaker),
-      );
-      return found?.data?.extensions?.voice_mode;
+      return findCharacter(host.getContext().characters, speaker, avatar)?.data?.extensions?.voice_mode;
     } catch {
       return undefined;
     }
@@ -340,48 +344,38 @@ export function createVoiceModeRuntime(host: SillyTavernHostBridge): VoiceModeRu
     }
   };
 
-  const collectRepliesForExport = (
-    limit: number,
-  ): Array<{ mes: string; name?: string }> => {
-    const ctx = host.getContext();
-    const chat = Array.isArray(ctx.chat) ? ctx.chat : [];
-    const replies: Array<{ mes: string; name?: string }> = [];
-    for (let i = chat.length - 1; i >= 0 && replies.length < limit; i--) {
-      const message = chat[i] as { mes?: unknown; name?: unknown; is_user?: unknown } | undefined;
-      if (!message || message.is_user === true) continue;
-      const mes = typeof message.mes === "string" ? message.mes.trim() : "";
-      if (!mes) continue;
-      replies.push({ mes, name: typeof message.name === "string" ? message.name : undefined });
-    }
-    return replies.reverse();
-  };
-
   const exportRepliesAsWav = async (limit: number): Promise<{
     sentences: number;
     skipped: number;
     reason?: "no-wav-engine" | "empty";
     wav: Uint8Array | null;
   }> => {
-    const replies = collectRepliesForExport(limit);
-    if (replies.length === 0) {
-      return { sentences: 0, skipped: 0, reason: "empty", wav: null };
+    const { chat, characters } = host.getContext();
+    const exportRouter = new StreamingUtteranceRouter({
+      narrationSplitEnabled: getSettings().narrationSplitEnabled,
+      segmenterOptions: { maxSentenceChars: 200 },
+    });
+    const replies: RoutedUtterance[][] = [];
+    for (let i = (Array.isArray(chat) ? chat.length : 0) - 1; i >= 0 && replies.length < limit; i--) {
+      const message = chat[i];
+      if (!message || message.is_user || message.is_system) continue;
+      if (!getRenderedMessageText(message).trim()) continue;
+      const character = findCharacter(characters, message.name, message.original_avatar);
+      replies.push(exportRouter.onCharacterMessageRendered({
+        messageId: i,
+        message: {
+          ...message,
+          name: message.name || character?.name,
+          original_avatar: message.original_avatar || character?.avatar,
+        },
+      }));
     }
-    const utterances: Array<{ role: "character"; speaker: string; text: string }> = [];
-    for (const reply of replies) {
-      const speaker = reply.name || resolveActiveSpeaker().speaker;
-      const segmenter = new SentenceSegmenter({ maxSentenceChars: 200 });
-      const sentences = [...segmenter.feed(reply.mes), ...segmenter.flush()]
-        .map((sentence) => sentence.trim())
-        .filter((sentence) => sentence.length > 0);
-      for (const text of sentences) {
-        utterances.push({ role: "character", speaker, text });
-      }
+    const utterances = replies.reverse().flat();
+    if (utterances.length === 0) {
+      return { sentences: 0, skipped: 0, reason: "empty", wav: null };
     }
     return ttsHub.exportUtterances(utterances);
   };
-
-  const exportLastReplyAsWav = () => exportRepliesAsWav(1);
-  const exportRecentRepliesAsWav = () => exportRepliesAsWav(10);
 
   const mountSettingsDrawer = (explicitDoc?: Document | null): HTMLElement | null => {
     const doc = explicitDoc ?? getDoc();
@@ -412,8 +406,8 @@ export function createVoiceModeRuntime(host: SillyTavernHostBridge): VoiceModeRu
         }
       },
       toggleDictation,
-      exportLastReplyAsWav,
-      exportRecentRepliesAsWav,
+      exportLastReplyAsWav: () => exportRepliesAsWav(1),
+      exportRecentRepliesAsWav: () => exportRepliesAsWav(10),
       getDiagnostics: collectDiagnostics,
     });
     return drawer.root;

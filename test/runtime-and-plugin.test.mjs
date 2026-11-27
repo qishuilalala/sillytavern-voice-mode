@@ -291,7 +291,11 @@ function createMiniDom() {
   };
 }
 
-function createDrawerFixture({ translate, secrets, secure = true, firstCharacter = "Alice", chat = [], defaultEngine = "system" } = {}) {
+function createDrawerFixture({
+  translate, secrets, secure = true, firstCharacter = "Alice", chat = [], defaultEngine = "system",
+  characters = [{ name: firstCharacter, avatar: "alice.png" }, { name: "Bob", avatar: "bob.png" }],
+  fetchImpl,
+} = {}) {
   const eventSource = createFakeEventSource();
   const doc = createMiniDom();
   const extensionSettings = {
@@ -303,11 +307,6 @@ function createDrawerFixture({ translate, secrets, secure = true, firstCharacter
     },
   };
   let activeIdx = 0;
-  const characters = [
-    { name: firstCharacter, avatar: "alice.png" },
-    { name: "Bob", avatar: "bob.png" },
-  ];
-
   const runtime = createVoiceModeRuntime({
     eventSource,
     eventTypes: {
@@ -342,6 +341,7 @@ function createDrawerFixture({ translate, secrets, secure = true, firstCharacter
     setExtensionPrompt: () => {},
     getRequestHeaders: () => ({}),
     translate,
+    fetchImpl,
     secrets: secrets ?? { writeSecret: async () => "1", findSecret: async () => null, deleteSecret: async () => {} },
     getWindow: () => ({ isSecureContext: secure, location: { protocol: "http:", host: "example.test:8000" } }),
     getDocument: () => doc,
@@ -662,16 +662,18 @@ test("Export chat collects recent AI replies in order and reports a non-WAV engi
   }
 });
 
-test("Export chat end-to-end through a mocked daemon reports the exported sentence count", async () => {
+test("WAV export sends AI replies in order with their avatar, card, and narration voices", async () => {
   const { encodeMonoPcm16Wav } = await import("@voice-mode/core");
   const wav = encodeMonoPcm16Wav(new Float32Array(2400).fill(0.1), 24000);
   const chat = [
     { is_user: true, mes: "hello from the user" },
-    { is_user: false, name: "Alice", mes: "First reply. Second sentence." },
-    { is_user: false, name: "Alice", mes: "Third reply here." },
+    { is_user: false, name: "Renamed Alice", original_avatar: "alice.png", mes: '*First reply.* "Second sentence."' },
+    { is_user: false, name: "Twin", original_avatar: "twin-b.png", mes: "The second twin replies." },
+    { is_user: false, name: "Bob", mes: "*Bob nods.* Third reply here." },
+    { is_user: false, is_system: true, mes: "System notice." },
   ];
-  const baseFetch = globalThis.fetch;
-  globalThis.fetch = async (url) => {
+  const speech = [];
+  const fetchImpl = async (url, init) => {
     const u = String(url);
     if (u.endsWith("/v1/health")) {
       return new Response(
@@ -679,24 +681,65 @@ test("Export chat end-to-end through a mocked daemon reports the exported senten
         { status: 200, headers: { "content-type": "application/json" } },
       );
     }
+    const { input, voice } = JSON.parse(init.body);
+    speech.push({ input, voice });
     return new Response(wav, { status: 200, headers: { "content-type": "audio/wav" } });
   };
   const { doc, runtime } = createDrawerFixture({
     chat,
     defaultEngine: "kokoro-daemon",
+    characters: [
+      { name: "Alice", avatar: "alice.png" },
+      { name: "Bob", avatar: "bob.png", data: { extensions: { voice_mode: { engine: "kokoro-daemon", voice: "af_heart" } } } },
+      { name: "Twin", avatar: "twin-a.png", data: { extensions: { voice_mode: { engine: "kokoro-daemon", voice: "af_sky" } } } },
+      { name: "Twin", avatar: "twin-b.png", data: { extensions: { voice_mode: { engine: "kokoro-daemon", voice: "af_bella" } } } },
+    ],
+    fetchImpl,
     translate: (fallback, key) => chineseCatalog[key] || fallback,
   });
   try {
     await runtime.activate();
+    runtime.updateSettings((settings) => {
+      settings.narrationSplitEnabled = true;
+      settings.narratorVoice = { engine: "kokoro-daemon", voice: "af_maple" };
+      settings.voiceMap = { "alice.png": { engine: "kokoro-daemon", voice: "zf_xiaobei" } };
+    });
     const badge = doc.getElementById("voice_mode_settings_drawer").children[0].children[1];
-    doc.getElementById("vm_st_export_chat_btn").click();
-    const deadline = Date.now() + 5000;
-    while (Date.now() < deadline && !badge.textContent.includes("已导出")) {
-      await new Promise((resolve) => setTimeout(resolve, 20));
-    }
-    assert.equal(badge.textContent, "已导出 3 句为 WAV。");
+    const runExport = async (buttonId) => {
+      doc.getElementById(buttonId).click();
+      const deadline = Date.now() + 5000;
+      while (Date.now() < deadline && badge.textContent === "正在导出…") {
+        await new Promise((resolve) => setTimeout(resolve, 20));
+      }
+    };
+    await runExport("vm_st_export_chat_btn");
+    assert.deepEqual(speech, [
+      { input: "First reply.", voice: "af_maple" },
+      { input: "Second sentence.", voice: "zf_xiaobei" },
+      { input: "The second twin replies.", voice: "af_bella" },
+      { input: "Bob nods.", voice: "af_maple" },
+      { input: "Third reply here.", voice: "af_heart" },
+    ]);
+    assert.equal(badge.textContent, "已导出 5 句为 WAV。");
+
+    speech.length = 0;
+    runtime.updateSettings((settings) => {
+      settings.narratorVoice = { engine: "system", voice: "" };
+    });
+    await runExport("vm_st_export_wav_btn");
+    assert.deepEqual(speech, [{ input: "Third reply here.", voice: "af_heart" }]);
+    assert.equal(badge.textContent, "已导出 1 句为 WAV，另有 1 句未生成兼容的 WAV 音频。");
+
+    speech.length = 0;
+    chat.push({ is_user: false, name: "Bob", original_avatar: "bob.png", mes: "```js\nconst a = 1;\n```" });
+    await runExport("vm_st_export_wav_btn");
+    assert.deepEqual(speech, []);
+    assert.equal(badge.textContent, "没有可导出的回复。");
+
+    chat.push({ is_user: false, name: "Bob", mes: "", extra: { display_text: "Visible reply only." } });
+    await runExport("vm_st_export_wav_btn");
+    assert.deepEqual(speech, [{ input: "Visible reply only.", voice: "af_heart" }]);
   } finally {
-    globalThis.fetch = baseFetch;
     await runtime.dispose();
   }
 });

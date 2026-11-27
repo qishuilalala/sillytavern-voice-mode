@@ -3384,6 +3384,11 @@ function formatSafeError(err, knownSecrets = []) {
 }
 
 // src/stream-router.ts
+function getRenderedMessageText(message) {
+  const displayText = message.extra?.display_text;
+  if (typeof displayText === "string" && displayText.trim()) return displayText;
+  return typeof message.mes === "string" ? message.mes : "";
+}
 function commonPrefixLength(a, b) {
   const limit = Math.min(a.length, b.length);
   let i = 0;
@@ -3524,7 +3529,7 @@ var StreamingUtteranceRouter = class {
       this.handledLastGenerationByStream = true;
       return tail;
     }
-    const displayText = typeof msg.extra?.display_text === "string" && msg.extra.display_text.trim() ? msg.extra.display_text : msg.mes ?? "";
+    const displayText = getRenderedMessageText(msg);
     if (!displayText.trim()) return [];
     this.reset();
     const speaker = msg.name ?? this.resolveActiveSpeaker?.().speaker ?? "";
@@ -6508,13 +6513,7 @@ var VoiceModeTtsHub = class {
     let skipped = 0;
     const exportedKeys = [];
     for (const utterance of utterances) {
-      const envelope = JSON.stringify({
-        seq: ++this.seq,
-        role: utterance.role,
-        speaker: utterance.speaker,
-        ...utterance.avatar ? { avatar: utterance.avatar } : {},
-        text: utterance.text
-      });
+      const envelope = JSON.stringify(this.createEnvelope(utterance, this.options.getSettings()));
       exportedKeys.push(envelope);
       let result = null;
       try {
@@ -6552,14 +6551,18 @@ var VoiceModeTtsHub = class {
   enqueueUtterance(utterance) {
     const settings = this.options.getSettings();
     if (!settings.enabled) return false;
+    const envelope = this.createEnvelope(utterance, settings);
+    const resolved = resolveUtteranceVoice(utterance, settings, envelope.cardVoice);
+    this.lastUsesSystemTts = resolved.engine === "system";
+    return this.queue.enqueue(JSON.stringify(envelope));
+  }
+  createEnvelope(utterance, settings) {
     const cardVoiceRaw = this.options.getCharacterCardVoice?.(
       utterance.speaker,
       utterance.avatar
     );
     const cardVoice = cardVoiceRaw && typeof cardVoiceRaw === "object" ? normalizeVoiceAssignment(cardVoiceRaw, settings.defaultVoice.engine) : void 0;
-    const resolved = resolveUtteranceVoice(utterance, settings, cardVoice);
-    this.lastUsesSystemTts = resolved.engine === "system";
-    const envelope = {
+    return {
       seq: ++this.seq,
       role: utterance.role,
       speaker: utterance.speaker,
@@ -6567,7 +6570,6 @@ var VoiceModeTtsHub = class {
       text: utterance.text,
       ...cardVoice ? { cardVoice } : {}
     };
-    return this.queue.enqueue(JSON.stringify(envelope));
   }
   cancel() {
     this.pendingInfo.clear();
@@ -7440,7 +7442,7 @@ function buildSettingsDrawer(doc, hostContainer, options) {
           URL.revokeObjectURL(url);
         } catch {
         }
-        statusBadgeEl.textContent = text("export_done", "Exported {0} sentences to WAV.", String(result.sentences));
+        statusBadgeEl.textContent = result.skipped > 0 ? text("export_partial", "Exported {0} sentences to WAV. Skipped {1} without compatible WAV audio.", String(result.sentences), String(result.skipped)) : text("export_done", "Exported {0} sentences to WAV.", String(result.sentences));
       } catch {
         statusBadgeEl.textContent = text("export_failed", "Export failed. Check the console and retry.");
       } finally {
@@ -7522,6 +7524,13 @@ function createUiText(translate2) {
 }
 
 // src/runtime.ts
+function findCharacter(characters, speaker, avatar) {
+  const byAvatar = avatar && characters.find((character) => character.avatar === avatar);
+  if (byAvatar) return byAvatar;
+  if (!speaker) return void 0;
+  const byName = characters.filter((character) => character.name === speaker);
+  return byName.length === 1 ? byName[0] : void 0;
+}
 function createVoiceModeRuntime(host) {
   let activated = false;
   let emotionPromptRegistered = false;
@@ -7576,11 +7585,7 @@ function createVoiceModeRuntime(host) {
   };
   const getCharacterCardVoice = (speaker, avatar) => {
     try {
-      const ctx = host.getContext();
-      const found = ctx.characters.find(
-        (c) => avatar && c.avatar === avatar || speaker && c.name === speaker
-      );
-      return found?.data?.extensions?.voice_mode;
+      return findCharacter(host.getContext().characters, speaker, avatar)?.data?.extensions?.voice_mode;
     } catch {
       return void 0;
     }
@@ -7709,37 +7714,33 @@ function createVoiceModeRuntime(host) {
       void io.startDictation().catch(showMicError);
     }
   };
-  const collectRepliesForExport = (limit) => {
-    const ctx = host.getContext();
-    const chat = Array.isArray(ctx.chat) ? ctx.chat : [];
-    const replies = [];
-    for (let i = chat.length - 1; i >= 0 && replies.length < limit; i--) {
-      const message = chat[i];
-      if (!message || message.is_user === true) continue;
-      const mes = typeof message.mes === "string" ? message.mes.trim() : "";
-      if (!mes) continue;
-      replies.push({ mes, name: typeof message.name === "string" ? message.name : void 0 });
-    }
-    return replies.reverse();
-  };
   const exportRepliesAsWav = async (limit) => {
-    const replies = collectRepliesForExport(limit);
-    if (replies.length === 0) {
-      return { sentences: 0, skipped: 0, reason: "empty", wav: null };
+    const { chat, characters } = host.getContext();
+    const exportRouter = new StreamingUtteranceRouter({
+      narrationSplitEnabled: getSettings().narrationSplitEnabled,
+      segmenterOptions: { maxSentenceChars: 200 }
+    });
+    const replies = [];
+    for (let i = (Array.isArray(chat) ? chat.length : 0) - 1; i >= 0 && replies.length < limit; i--) {
+      const message = chat[i];
+      if (!message || message.is_user || message.is_system) continue;
+      if (!getRenderedMessageText(message).trim()) continue;
+      const character = findCharacter(characters, message.name, message.original_avatar);
+      replies.push(exportRouter.onCharacterMessageRendered({
+        messageId: i,
+        message: {
+          ...message,
+          name: message.name || character?.name,
+          original_avatar: message.original_avatar || character?.avatar
+        }
+      }));
     }
-    const utterances = [];
-    for (const reply of replies) {
-      const speaker = reply.name || resolveActiveSpeaker().speaker;
-      const segmenter = new SentenceSegmenter({ maxSentenceChars: 200 });
-      const sentences = [...segmenter.feed(reply.mes), ...segmenter.flush()].map((sentence) => sentence.trim()).filter((sentence) => sentence.length > 0);
-      for (const text2 of sentences) {
-        utterances.push({ role: "character", speaker, text: text2 });
-      }
+    const utterances = replies.reverse().flat();
+    if (utterances.length === 0) {
+      return { sentences: 0, skipped: 0, reason: "empty", wav: null };
     }
     return ttsHub.exportUtterances(utterances);
   };
-  const exportLastReplyAsWav = () => exportRepliesAsWav(1);
-  const exportRecentRepliesAsWav = () => exportRepliesAsWav(10);
   const mountSettingsDrawer = (explicitDoc) => {
     const doc = explicitDoc ?? getDoc();
     if (!doc) return null;
@@ -7764,8 +7765,8 @@ function createVoiceModeRuntime(host) {
         }
       },
       toggleDictation,
-      exportLastReplyAsWav,
-      exportRecentRepliesAsWav,
+      exportLastReplyAsWav: () => exportRepliesAsWav(1),
+      exportRecentRepliesAsWav: () => exportRepliesAsWav(10),
       getDiagnostics: collectDiagnostics
     });
     return drawer.root;

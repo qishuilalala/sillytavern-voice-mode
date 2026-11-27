@@ -29,6 +29,12 @@ export interface RenderedMessageInput {
   } | null;
 }
 
+export function getRenderedMessageText(message: NonNullable<RenderedMessageInput["message"]>): string {
+  const displayText = message.extra?.display_text;
+  if (typeof displayText === "string" && displayText.trim()) return displayText;
+  return typeof message.mes === "string" ? message.mes : "";
+}
+
 export interface StreamingUtteranceRouterOptions {
   narrationSplitEnabled?: boolean;
   segmenterOptions?: SegmenterOptions;
@@ -191,10 +197,7 @@ export class StreamingUtteranceRouter {
       return tail;
     }
 
-    const displayText =
-      typeof msg.extra?.display_text === "string" && msg.extra.display_text.trim()
-        ? msg.extra.display_text
-        : (msg.mes ?? "");
+    const displayText = getRenderedMessageText(msg);
     if (!displayText.trim()) return [];
 
     this.reset();

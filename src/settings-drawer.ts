@@ -423,7 +423,9 @@ export function buildSettingsDrawer(
         } catch {
           // Download API unavailable (e.g. test DOM): the export itself still succeeded.
         }
-        statusBadgeEl.textContent = text("export_done", "Exported {0} sentences to WAV.", String(result.sentences));
+        statusBadgeEl.textContent = result.skipped > 0
+          ? text("export_partial", "Exported {0} sentences to WAV. Skipped {1} without compatible WAV audio.", String(result.sentences), String(result.skipped))
+          : text("export_done", "Exported {0} sentences to WAV.", String(result.sentences));
       } catch {
         statusBadgeEl.textContent = text("export_failed", "Export failed. Check the console and retry.");
       } finally {

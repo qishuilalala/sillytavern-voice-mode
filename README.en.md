@@ -62,7 +62,7 @@ The extension works immediately with zero configuration, but the advertised feat
 | **Advanced · local daemon** | Run [Voice Mode Daemon](https://github.com/qishuilalala/voice-mode-daemon) from source (developer-only backend) | 103 Kokoro voices, `<whisper>`/`<break Nms>` emotion prosody, local `Zipformer2`/`SenseVoice` dictation, hands-free AEC3 barge-in. | Requires Node.js + pnpm build + model download; the daemon is not distributed as a store package. |
 | **Advanced · BYOK cloud** | Configure an OpenAI-compatible or MiMo endpoint and save the key | Cloud TTS/ASR quality without local model downloads. | Needs an API key; speakable text or utterance audio leaves the machine to the chosen provider. |
 
-**Export (WAV).** The settings drawer has two export buttons: **Export last reply as WAV** (the latest character reply) and **Export last 10 replies as WAV** (the last ten AI replies, in order). Both need a WAV-capable engine (local `kokoro-daemon` or a self-hosted WAV engine); system/MP3 engines report that export is unavailable, and the buttons share a single export slot so repeated clicks cannot start concurrent exports.
+**Export (WAV).** The settings drawer can save the last character reply or the last ten in order as one WAV file. Export uses the same character and narrator voices as playback and reports any sentences without compatible WAV audio. Both buttons share a single export slot, so repeated clicks cannot start concurrent exports.
 
 **Diagnostics.** The same drawer has a **Copy diagnostics** button: it copies a redacted snapshot (activation state, first-sentence latency, barge-in count, daemon fallback reason, last error, and the last 10 utterances) so bug reports include reproducible evidence.
 

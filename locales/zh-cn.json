@@ -62,6 +62,7 @@
   "voice_mode.export_wav": "导出最近回复为 WAV",
   "voice_mode.exporting": "正在导出…",
   "voice_mode.export_done": "已导出 {0} 句为 WAV。",
+  "voice_mode.export_partial": "已导出 {0} 句为 WAV，另有 {1} 句未生成兼容的 WAV 音频。",
   "voice_mode.export_empty": "没有可导出的回复。",
   "voice_mode.export_no_wav": "当前 TTS 引擎无法导出 WAV；需要本地语音守护进程或支持 WAV 的引擎。",
   "voice_mode.export_failed": "导出失败，请检查控制台后重试。",
