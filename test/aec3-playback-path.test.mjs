@@ -23,8 +23,8 @@
  * `AudioWorkletNode` are fakes that record mic open/stop windows and can push
  * 1024-sample (64 ms) speech frames into the real default capture path.
  *
- * Expected on HEAD 02424b5 (main): S1, S2a and S2b are RED; S3/S4/S5 lock in the
- * currently-correct behaviour.
+ * Expected on HEAD 02424b5 (main): S1, S2a, S2b and the S6/S7 BYOK-fallback pair
+ * are RED; S3/S4/S5 lock in the currently-correct behaviour.
  */
 import assert from "node:assert/strict";
 import test from "node:test";
@@ -726,4 +726,113 @@ test("S5: normal BYOK playback arms AEC3 and confirmed speech (5x64ms) barges in
     await runtime?.dispose().catch(() => undefined);
     device.restore();
   }
+});
+
+/**
+ * S6/S7: BYOK (`openai-compat` / `mimo`) synthesis failure falls back to OS
+ * `speechSynthesis` (`SYSTEM_TTS_MIME`). The fallback result must reach the queue as
+ * the ACTUAL `system` engine (`tts-hub.ts` `markSystemFallbackEngine` rewrites
+ * `pendingInfo.engine`), so the per-utterance AEC3 guard must never arm the microphone
+ * for that sentence and playback must continue uninterrupted. On HEAD 02424b5 both
+ * scenarios are RED: only the kokoro-daemon branch rewrote `pendingInfo.engine`, so
+ * the runtime saw `engine="openai-compat"|"mimo"` while OS speech played and armed
+ * AEC3 from the enqueue-time configured-engine prediction.
+ */
+async function assertByokSystemFallbackDoesNotArmAec3({ engine, extraSettings, label }) {
+  const device = installDeviceBoundaryStub();
+  const { sink, plays } = createRecordingSink({ playMs: 400 });
+  let runtime;
+  try {
+    const fixture = createHostFixture({
+      sink,
+      bargeInMode: "detect",
+      defaultVoice: { engine, voice: "alloy" },
+      narrationSplitEnabled: false,
+      extraSettings,
+      fetchImpl: async () => {
+        throw new TypeError("fetch failed: ECONNREFUSED (BYOK endpoint offline)");
+      },
+    });
+    runtime = fixture.runtime;
+    await runtime.activate();
+    await fixture.eventSource.emit(EVENT_TYPES.GENERATION_STARTED, "normal", {}, false);
+    await fixture.eventSource.emit(
+      EVENT_TYPES.STREAM_TOKEN_RECEIVED,
+      "The BYOK endpoint is offline so the operating system reads this sentence. ",
+    );
+
+    await waitFor(() => plays.some((play) => play.mime === SYSTEM_TTS_MIME && !play.end), {
+      label: `${label}: system speechSynthesis playback after BYOK fallback`,
+    });
+    const systemPlay = plays.find((play) => play.mime === SYSTEM_TTS_MIME && !play.end);
+
+    // Precondition: the configured engine is the BYOK provider but the ACTUAL playback
+    // path is system TTS; the pendingInfo correction must surface the real engine.
+    const utterance = runtime.getDiagnostics().utteranceHistory[0];
+    assert.ok(utterance, `${label}: expected the fallback utterance to reach playback`);
+    assert.equal(
+      utterance.engine,
+      "system",
+      `${label}: BYOK synthesis failure must surface the actual playback engine 'system' ` +
+        "(pendingInfo.engine rewrite), not the configured provider engine",
+    );
+
+    // Sample the middle of the OS speech playback window: AEC3 must not be armed.
+    await waitFor(() => Date.now() >= systemPlay.start + 200, {
+      label: `${label}: middle of system-TTS playback window`,
+    });
+    const micArmedDuringSystemPlayback = device.isMicOpenAt(Date.now());
+    const getUserMediaCalls = device.getUserMediaCount();
+
+    // OS voice echo captured by an armed mic would self-trigger barge-in here.
+    await device.pushSpeechFrames(5);
+    await sleep(250);
+    await waitFor(() => plays[0].end > 0, { label: `${label}: fallback playback finishing` });
+
+    assert.deepEqual(
+      {
+        playedMimes: plays.map((play) => play.mime),
+        actualPlaybackEngine: utterance.engine,
+        micArmedDuringSystemPlayback,
+        getUserMediaCalls,
+        micOpenAfterPlayback: device.openStreamCount(),
+        echoSelfTriggeredBargeIns: runtime.getDiagnostics().totalBargeIns,
+        stopGenerationCalls: fixture.stopGenCalls(),
+        playbackContinues: plays[0].aborted === false,
+      },
+      {
+        playedMimes: [SYSTEM_TTS_MIME],
+        actualPlaybackEngine: "system",
+        micArmedDuringSystemPlayback: false,
+        getUserMediaCalls: 0,
+        micOpenAfterPlayback: 0,
+        echoSelfTriggeredBargeIns: 0,
+        stopGenerationCalls: 0,
+        playbackContinues: true,
+      },
+      `${label}: the ${engine} provider was offline and the sentence actually played through ` +
+        "window.speechSynthesis (SYSTEM_TTS_MIME), but AEC3 was armed from the configured " +
+        "provider engine and/or the actual engine was not surfaced; OS speech bypasses " +
+        "Chromium AEC3, so its echo self-interrupts playback.",
+    );
+  } finally {
+    await runtime?.dispose().catch(() => undefined);
+    device.restore();
+  }
+}
+
+test("S6: openai-compat offline system-TTS fallback must not arm AEC3", async () => {
+  await assertByokSystemFallbackDoesNotArmAec3({
+    engine: "openai-compat",
+    extraSettings: { openaiTtsBaseUrl: "http://127.0.0.1:18792/v1" },
+    label: "S6",
+  });
+});
+
+test("S7: mimo offline system-TTS fallback must not arm AEC3", async () => {
+  await assertByokSystemFallbackDoesNotArmAec3({
+    engine: "mimo",
+    extraSettings: { mimoBaseUrl: "http://127.0.0.1:18791" },
+    label: "S7",
+  });
 });
