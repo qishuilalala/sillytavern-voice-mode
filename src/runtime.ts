@@ -325,11 +325,14 @@ export function createVoiceModeRuntime(host: SillyTavernHostBridge): VoiceModeRu
   ): VoiceModeExtensionSettings => {
     const current = getSettings();
     mutator(current);
-    const normalized = ensureExtensionSettings(host.extensionSettings);
-    router.setNarrationSplitEnabled(normalized.narrationSplitEnabled);
+    const next = ensureExtensionSettings(host.extensionSettings);
+    router.setNarrationSplitEnabled(next.narrationSplitEnabled);
+    // Manual mode is an explicit "no hands-free microphone" choice: an already armed
+    // monitor must stop now rather than survive until the next utterance/turn.
+    if (next.bargeInMode === "manual") bargeInGuard?.reset();
     syncEmotionPrompt();
     host.saveSettingsDebounced();
-    return normalized;
+    return next;
   };
 
   const subscribe = (
@@ -480,6 +483,10 @@ export function createVoiceModeRuntime(host: SillyTavernHostBridge): VoiceModeRu
         } else {
           router.reset();
         }
+        // Short replies drain the queue before GENERATION_ENDED, so the earlier idle
+        // transition skipped disarm while the host was still generating; settle the
+        // microphone now that the turn is actually over (tail sentences keep it playing).
+        if (ttsHub.state === "idle" && !isHostGenerating()) bargeInGuard?.reset();
       });
       subscribe(et.GENERATION_STOPPED, () => {
         inFlightGenerationEvent = false;

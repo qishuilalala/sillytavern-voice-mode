@@ -7712,11 +7712,12 @@ function createVoiceModeRuntime(host) {
   const updateSettings = (mutator) => {
     const current = getSettings();
     mutator(current);
-    const normalized = ensureExtensionSettings(host.extensionSettings);
-    router.setNarrationSplitEnabled(normalized.narrationSplitEnabled);
+    const next = ensureExtensionSettings(host.extensionSettings);
+    router.setNarrationSplitEnabled(next.narrationSplitEnabled);
+    if (next.bargeInMode === "manual") bargeInGuard?.reset();
     syncEmotionPrompt();
     host.saveSettingsDebounced();
-    return normalized;
+    return next;
   };
   const subscribe = (eventName, fn, useMakeLast = false) => {
     if (!eventName) return;
@@ -7845,6 +7846,7 @@ function createVoiceModeRuntime(host) {
         } else {
           router.reset();
         }
+        if (ttsHub.state === "idle" && !isHostGenerating()) bargeInGuard?.reset();
       });
       subscribe(et.GENERATION_STOPPED, () => {
         inFlightGenerationEvent = false;
