@@ -20,6 +20,11 @@
  *
  * Device boundary (microphone / AudioWorklet) is stubbed in-process like
  * `test/aec3-playback-path.test.mjs`; no real device, network, or machine state.
+ *
+ * RT-3/RT-4/RT-5 are regression locks around the D1/D2 fixes: a tail sentence flushed by
+ * GENERATION_ENDED must not be mistaken for turn end (mic stays armed while it plays),
+ * the next turn after the turn-end settle must re-arm and barge in normally, and switching
+ * to manual while idle (nothing playing) must not arm/disarm anything.
  */
 import assert from "node:assert/strict";
 import test from "node:test";
@@ -462,6 +467,193 @@ test("RT-2 (D2): switching bargeInMode to manual mid-playback must disarm; switc
       "RT-2: exactly one microphone open during turn 1 and one re-open for turn 2",
     );
     assert.equal(plays.length, 2, "RT-2: the next turn's sentence plays while armed");
+  } finally {
+    await runtime?.dispose().catch(() => undefined);
+    device.restore();
+  }
+});
+
+/**
+ * RT-3 (D1 regression lock): GENERATION_ENDED may flush a trailing sentence, which
+ * synchronously re-enqueues and puts the queue back into "playing". That is not a turn
+ * end: the tail sentence still needs hands-free barge-in, so the microphone must stay
+ * armed (D1's settle guard must skip when the queue is playing) and the tail must play.
+ */
+test("RT-3: GENERATION_ENDED tail flush keeps the mic armed and plays the tail sentence", async () => {
+  const device = installDeviceBoundaryStub();
+  const { sink, plays } = createRecordingSink({ playMs: 120 });
+  let runtime;
+  try {
+    const fixture = createHostFixture({ sink, fetchImpl: byokFetch });
+    runtime = fixture.runtime;
+    await runtime.activate();
+
+    // Short reply: the first sentence finishes playing before the generation ends.
+    fixture.setGenerating(true);
+    await fixture.eventSource.emit(EVENT_TYPES.GENERATION_STARTED, "normal", {}, false);
+    await fixture.eventSource.emit(EVENT_TYPES.STREAM_TOKEN_RECEIVED, "Hi. ");
+    await waitFor(() => plays.length === 1 && plays[0].end > 0, { label: "turn-1 playback finished" });
+    await waitFor(() => device.openStreamCount() === 1, { label: "AEC3 armed during playback" });
+
+    // Unterminated trailing text: only the GENERATION_ENDED flush emits it, synchronously
+    // transitioning the idle queue back to "playing" before the settle guard runs.
+    await fixture.eventSource.emit(
+      EVENT_TYPES.STREAM_TOKEN_RECEIVED,
+      "Hi. And an unfinished tail",
+    );
+    fixture.setGenerating(false);
+    await fixture.eventSource.emit(EVENT_TYPES.GENERATION_ENDED, 1);
+
+    await waitFor(() => plays.length === 2 && plays[1].start > 0 && !plays[1].end, {
+      label: "tail sentence flushed by GENERATION_ENDED is playing",
+    });
+    assert.deepEqual(
+      {
+        micArmedDuringTailPlayback: device.openStreamCount(),
+        microphoneOpenCalls: device.getUserMediaCount(),
+        bargeIns: runtime.getDiagnostics().totalBargeIns,
+      },
+      {
+        micArmedDuringTailPlayback: 1,
+        microphoneOpenCalls: 1,
+        bargeIns: 0,
+      },
+      "RT-3: a tail sentence flushed by GENERATION_ENDED must keep playing with the " +
+        "microphone still armed (no close/reopen) — the D1 settle must not treat this " +
+        "as a turn end",
+    );
+
+    await waitFor(() => plays[1].end > 0, { label: "tail playback finished" });
+    assert.equal(plays[1].aborted, false, "RT-3: the flushed tail sentence completes normally");
+    await waitFor(() => device.openStreamCount() === 0, {
+      timeoutMs: 1500,
+      label: "microphone closed after the tail playback really finished",
+    });
+  } finally {
+    await runtime?.dispose().catch(() => undefined);
+    device.restore();
+  }
+});
+
+/** RT-4 (D1 regression lock): after the turn-end settle closes the mic, the next turn re-arms and can barge in. */
+test("RT-4: next turn re-arms AEC3 after the turn-end settle and barge-in works again", async () => {
+  const device = installDeviceBoundaryStub();
+  const { sink, plays } = createRecordingSink({ playMs: 600 });
+  let runtime;
+  try {
+    const fixture = createHostFixture({ sink, fetchImpl: byokFetch });
+    runtime = fixture.runtime;
+    await runtime.activate();
+
+    // Turn 1: short reply drains before GENERATION_ENDED; the settle closes the mic.
+    fixture.setGenerating(true);
+    await fixture.eventSource.emit(EVENT_TYPES.GENERATION_STARTED, "normal", {}, false);
+    await fixture.eventSource.emit(EVENT_TYPES.STREAM_TOKEN_RECEIVED, "Hi. ");
+    await waitFor(() => plays.length === 1 && plays[0].end > 0, { label: "turn-1 playback finished" });
+    fixture.setGenerating(false);
+    await fixture.eventSource.emit(EVENT_TYPES.GENERATION_ENDED, 1);
+    await waitFor(() => device.openStreamCount() === 0, {
+      timeoutMs: 1500,
+      label: "turn-end settle closing the microphone",
+    });
+    assert.equal(
+      device.getUserMediaCount(),
+      1,
+      "precondition: turn 1 armed AEC3 exactly once before the settle closed it",
+    );
+
+    // Turn 2: normal BYOK playback must re-arm the microphone and support barge-in.
+    fixture.setGenerating(true);
+    await fixture.eventSource.emit(EVENT_TYPES.GENERATION_STARTED, "normal", {}, false);
+    await fixture.eventSource.emit(EVENT_TYPES.STREAM_TOKEN_RECEIVED, "A longer line to interrupt. ");
+    await waitFor(() => plays.length === 2 && device.openStreamCount() === 1, {
+      label: "AEC3 re-armed by the next turn's playback",
+    });
+    assert.equal(
+      device.getUserMediaCount(),
+      2,
+      "RT-4: the next turn arms the microphone again (exactly one re-open)",
+    );
+
+    await device.pushSpeechFrames(5);
+    await waitFor(() => fixture.stopGenCalls() === 1, {
+      timeoutMs: 800,
+      label: "barge-in from confirmed speech in the next turn",
+    });
+    assert.deepEqual(
+      {
+        bargeIns: runtime.getDiagnostics().totalBargeIns,
+        stopGenerationCalls: fixture.stopGenCalls(),
+        playbackAborted: plays[1].aborted,
+      },
+      { bargeIns: 1, stopGenerationCalls: 1, playbackAborted: true },
+      "RT-4: after the turn-end settle, the next turn's armed microphone must still " +
+        "confirm speech and barge in normally",
+    );
+    await waitFor(() => device.openStreamCount() === 0, {
+      label: "barge-in stopping the microphone",
+    });
+  } finally {
+    await runtime?.dispose().catch(() => undefined);
+    device.restore();
+  }
+});
+
+/** RT-5 (D2 regression lock): switching to manual while idle (no playback) must not arm/disarm anything. */
+test("RT-5: switching bargeInMode while idle has no microphone side effects", async () => {
+  const device = installDeviceBoundaryStub();
+  const { sink, plays } = createRecordingSink({ playMs: 400 });
+  let runtime;
+  try {
+    const fixture = createHostFixture({ sink, fetchImpl: byokFetch, generating: false });
+    runtime = fixture.runtime;
+    await runtime.activate();
+    assert.equal(device.getUserMediaCount(), 0, "precondition: no microphone before any playback");
+
+    // Idle toggling: manual, then back to detect. Nothing is playing, so nothing may open.
+    runtime.updateSettings((draft) => {
+      draft.bargeInMode = "manual";
+    });
+    await sleep(150);
+    runtime.updateSettings((draft) => {
+      draft.bargeInMode = "detect";
+    });
+    await sleep(150);
+
+    assert.deepEqual(
+      {
+        microphoneOpenCalls: device.getUserMediaCount(),
+        micOpen: device.openStreamCount(),
+        bargeIns: runtime.getDiagnostics().totalBargeIns,
+        stopGenerationCalls: fixture.stopGenCalls(),
+        mode: runtime.getSettings().bargeInMode,
+      },
+      {
+        microphoneOpenCalls: 0,
+        micOpen: 0,
+        bargeIns: 0,
+        stopGenerationCalls: 0,
+        mode: "detect",
+      },
+      "RT-5: toggling bargeInMode while idle must not arm/disarm the microphone or " +
+        "trigger barge-in; the last selection persists",
+    );
+
+    // The idle toggling must not leave stale guard state: normal playback still arms once.
+    fixture.setGenerating(true);
+    await fixture.eventSource.emit(EVENT_TYPES.GENERATION_STARTED, "normal", {}, false);
+    await fixture.eventSource.emit(
+      EVENT_TYPES.STREAM_TOKEN_RECEIVED,
+      "Normal playback after idle mode switching. ",
+    );
+    await waitFor(() => plays.length === 1 && device.openStreamCount() === 1, {
+      label: "AEC3 armed for playback after idle mode switching",
+    });
+    assert.equal(
+      device.getUserMediaCount(),
+      1,
+      "RT-5: playback after idle mode switching arms the microphone exactly once",
+    );
   } finally {
     await runtime?.dispose().catch(() => undefined);
     device.restore();
